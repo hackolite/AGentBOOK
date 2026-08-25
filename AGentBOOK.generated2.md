@@ -4,6 +4,7 @@
 
 ## Sommaire
 
+- [Sommaire](#sommaire)
 - [Préface](#preface)
 - [Partie I — Comprendre les applications LLM](#partie-i-comprendre-les-applications-llm)
   - [Chapitre 1 — Des LLM aux systèmes agentiques](#chapitre-1-des-llm-aux-systemes-agentiques)
@@ -1678,14 +1679,7 @@ Dans les architectures simples, on peut conserver directement cette liste. Dans 
 
 ##### 1.4.10 Messages et séparation des responsabilités
 
-Les différents types de messages permettent également de maintenir une séparation conceptuelle entre les acteurs du système.
-
-| Message | Fonction |
-|---|---|
-| System | Définit le comportement et les contraintes |
-| Human | Fournit une demande ou une information |
-| AI | Produit une réponse ou demande une action |
-| Tool | Retourne le résultat d'une action |
+Les différents types de messages permettent également de maintenir une séparation conceptuelle entre les acteurs du système. Message Fonction System Définit le comportement et les contraintes Human Fournit une demande ou une information AI Produit une réponse ou demande une action Tool Retourne le résultat d'une action
 
 On peut retenir : System → règles Human → objectif AI → raisonnement / décision Tool → observation Cette représentation devient particulièrement puissante dans un agent :
 
@@ -1830,50 +1824,25 @@ Cette distinction entre texte destiné à un humain et données destinées à un
 
 ##### 1.5.1 Le problème du texte libre
 
-Par défaut, un LLM produit principalement du contenu textuel. Par exemple :
-
-> La personne située dans la zone A semble être tombée. La confiance de la détection est élevée, autour de 92 %.
-
-Cette réponse est parfaitement lisible par un humain. Mais si une application doit ensuite :
-
-- déclencher une alerte ;
-- enregistrer l'événement dans une base ;
-- envoyer une notification ;
-- appeler une API ;
-- alimenter un autre modèle ;
-
-elle doit d'abord **interpréter** cette réponse. On pourrait tenter de faire :
+- Par défaut, un LLM produit principalement du contenu textuel.
+- Par exemple :
+- La personne située dans la zone A semble être tombée.
+- La confiance de la détection est élevée, autour de 92 %.
+- Cette réponse est parfaitement lisible par un humain.
+- Mais si une application doit ensuite :
+- déclencher une alerte 
+- enregistrer l'événement dans une base 
+- envoyer une notification 
+- appeler une API 
+- alimenter un autre modèle 
+- elle doit d'abord interpréter cette réponse.
+- On pourrait tenter de faire :
 
 ```python
 response = model.invoke(prompt)
-
-# Essayer d'extraire les informations du texte
 ```
 
-Mais cette approche est fragile. Le modèle pourrait produire :
-
-```text
-La personne est probablement tombée.
-```
-
-puis :
-
-```text
-Il semble y avoir une chute dans la zone A.
-```
-
-ou encore :
-
-```text
-Event detected: person_fallen
-Confidence: approximately 0.92
-```
-
-Le programme devrait alors gérer de nombreux formats différents. Le problème devient donc :
-
-> **Comment transformer une génération probabiliste en données fiables et exploitables par un programme ?**
-
-La réponse est notamment l'utilisation de **sorties structurées**.
+# essayer d'extraire les informations du texte Mais cette approche est fragile. Le modèle pourrait produire : La personne est probablement tombée. puis : Il semble y avoir une chute dans la zone A. ou encore : Event detected: person_fallen Confidence: approximately 0.92 Le programme devrait alors gérer de nombreux formats différents. Le problème devient donc : Comment transformer une génération probabiliste en données fiables et exploitables par un programme ? La réponse est notamment l'utilisation de sorties structurées.
 
 ##### 1.5.2 Qu'est-ce qu'une sortie structurée ?
 
@@ -2354,16 +2323,7 @@ graph TD
     N384 --> N385
 ```
 
-Chaque couche possède une responsabilité différente.
-
-| Couche | Responsabilité |
-|---|---|
-| LLM | Interprétation / génération |
-| Structured Output | Format attendu |
-| Schema | Structure et types |
-| Validation métier | Cohérence avec l'application |
-| Tool | Exécution réelle |
-| Observation | Résultat de l'action |
+Chaque couche possède une responsabilité différente. Couche Responsabilité LLM Interprétation / génération Structured Output Format attendu Schema Structure et types Validation métier Cohérence avec l'application Tool Exécution réelle Observation Résultat de l'action
 
 Cette séparation est une caractéristique importante des systèmes agentiques robustes.
 
@@ -3554,19 +3514,7 @@ Il existe une règle particulièrement utile lorsqu'on conçoit des systèmes ag
 
 ##### 1.7.17 Comparaison synthétique
 
-| Critère | Workflow déterministe | Agent |
-|---|---|---|
-| Chemin | Défini par le code | Adapté dynamiquement |
-| Contrôle | Très élevé | Partagé avec le LLM |
-| Flexibilité | Limitée | Élevée |
-| Prévisibilité | Élevée | Plus faible |
-| Tests | Relativement simples | Plus complexes |
-| Latence | Prévisible | Variable |
-| Coût | Prévisible | Variable |
-| Sécurité | Plus simple | Plus complexe |
-| Outils | Appelés selon le code | Sélectionnés par le modèle |
-| Cas d'usage | Processus connus | Problèmes ouverts |
-| Autonomie | Faible | Élevée |
+Critère Workflow déterministe Agent Chemin Défini par le code Adapté dynamiquement Contrôle Très élevé Partagé avec le LLM Flexibilité Limitée Élevée Prévisibilité Élevée Plus faible Tests Relativement simples Plus complexes Latence Prévisible Variable Coût Prévisible Variable Sécurité Plus simple Plus complexe Outils Appelés selon le code Sélectionnés par le modèle Cas d'usage Processus connus Problèmes ouverts Autonomie Faible Élevée
 
 ##### 1.7.18 Le continuum plutôt qu'une opposition
 
@@ -4416,11 +4364,7 @@ graph TD
     N765 --> N766
 ```
 
-C'est cette boucle qui transforme progressivement une application LLM en système agentique. Et trois notions deviennent alors centrales pour la suite du livre :
-
-- **Tools** → ce que l'agent peut faire
-- **State** → ce que l'agent sait de la situation courante
-- **Loop / Graph** → comment l'agent évolue vers son objectif
+C'est cette boucle qui transforme progressivement une application LLM en système agentique. Et trois notions deviennent alors centrales pour la suite du livre : Tools → ce que l'agent peut faire State → ce que l'agent sait de la situation courante Loop / Graph → comment l'agent évolue vers son objectif.
 
 ---
 
@@ -5049,97 +4993,47 @@ Mais un système réel peut nécessiter :
 
 ```mermaid
 graph TD
-    START["START"]
-    LLM["LLM"]
-    Routing["Routing"]
-    RAG["RAG"]
-    API["API"]
-    CV["CV"]
-    Evaluate["Evaluate"]
-    Retry["Retry"]
-    END["END"]
-
-    START --> LLM
-    LLM --> Routing
-    Routing --> RAG
-    Routing --> API
-    Routing --> CV
-    RAG --> Evaluate
-    API --> Evaluate
-    CV --> Evaluate
-    Evaluate -->|"à améliorer"| Retry
-    Evaluate -->|"suffisant"| END
-    Retry --> LLM
+    N877["START"]
+    N878["LLM"]
+    N877 --> N878
+    N879["Routing"]
+    N878 --> N879
+    N880["/ | \"]
+    N879 --> N880
+    N881["RAG API CV"]
+    N880 --> N881
+    N882["Evaluate"]
+    N881 --> N882
+    N883["Retry END"]
+    N882 --> N883
+    N883 --> N878
 ```
 
-Il devient alors nécessaire de représenter explicitement :
-
-- l'état ;
-- les nœuds ;
-- les transitions ;
-- les conditions ;
-- les boucles ;
-- les interruptions ;
+- Il devient alors nécessaire de représenter explicitement :
+- l'état 
+- les nœuds 
+- les transitions 
+- les conditions 
+- les boucles 
+- les interruptions 
 - la persistence.
-
-C'est précisément le problème auquel répond **LangGraph**.
+- C'est précisément le problème auquel répond LangGraph.
 
 ##### 1.9.25 Définition opérationnelle à retenir
 
-Pour la suite de ce livre, nous utiliserons la définition suivante :
+Pour la suite de ce livre, nous utiliserons la définition suivante : Un système Agentic AI est une application dans laquelle un modèle d'IA participe dynamiquement à la sélection et à l'enchaînement d'actions nécessaires à l'accomplissement d'un objectif, en s'appuyant sur un état, des outils et des observations successives, dans un environnement contrôlé par une architecture logicielle. Cette définition permet de distinguer clairement : LLM → génère
 
-> **Un système Agentic AI est une application dans laquelle un modèle d'IA participe dynamiquement à la sélection et à l'enchaînement d'actions nécessaires à l'accomplissement d'un objectif, en s'appuyant sur un état, des outils et des observations successives, dans un environnement contrôlé par une architecture logicielle.**
+RAG → récupère des connaissances
 
-Cette définition permet de distinguer clairement :
+Tool → donne une capacité
 
-- **LLM** → génère
-- **RAG** → récupère des connaissances
-- **Tool** → donne une capacité
-- **Agent** → choisit dynamiquement des actions
-- **Agentic system** → organise cette boucle dans un système complet
+Agent → choisit dynamiquement des actions
+
+Agentic system → organise cette boucle dans un système complet
 
 ##### 1.9.26 À retenir
 
-L'Agentic AI ne doit pas être comprise comme une intelligence artificielle « magique » ou totalement autonome. Il s'agit avant tout d'une architecture logicielle dans laquelle un modèle participe au contrôle dynamique de l'exécution.
-
-Ses principaux **avantages** sont :
-
-- flexibilité ;
-- adaptation ;
-- utilisation dynamique des tools ;
-- résolution de problèmes ouverts ;
-- capacité à enchaîner plusieurs actions.
-
-Ses principales **limites** sont :
-
-- hallucinations ;
-- mauvais choix d'outils ;
-- non-déterminisme ;
-- coût ;
-- latence ;
-- boucles ;
-- sécurité ;
-- difficulté d'évaluation ;
-- difficulté de reproduction des erreurs.
-
-La conséquence fondamentale est la suivante :
-
-> **Plus un système est autonome, plus l'ingénierie autour du modèle devient importante.**
-
-Un agent de production ne repose donc pas uniquement sur un LLM performant. Il repose sur l'association de :
-
-```text
-LLM
-+  Tools
-+  State
-+  Orchestration
-+  Guardrails
-+  Evaluation
-+  Observability
-+  Security
-```
-
-C'est cette vision qui servira de base aux chapitres suivants : **LangChain** permettra de construire les composants de l'application, tandis que **LangGraph** permettra d'orchestrer les systèmes agentiques complexes, contrôlables et persistants.
+L'Agentic AI ne doit pas être comprise comme une intelligence artificielle « magique » ou totalement autonome. Il s'agit avant tout d'une architecture logicielle dans laquelle un modèle participe au contrôle dynamique de l'exécution. Ses principaux avantages sont : flexibilité ; adaptation ; utilisation dynamique des tools ; résolution de problèmes ouverts ; capacité à enchaîner plusieurs actions. Ses principales limites sont : hallucinations ; mauvais choix d'outils ; non-déterminisme ; coût ; latence ; boucles ; sécurité ; difficulté d'évaluation ; difficulté de reproduction des erreurs. La conséquence fondamentale est la suivante : Plus un système est autonome, plus l'ingénierie autour du modèle devient importante. Un agent de production ne repose donc pas uniquement sur un LLM performant. Il repose sur l'association de : LLM + Tools + State + Orchestration + Guardrails + Evaluation + Observability + Security C'est cette vision qui servira de base aux chapitres suivants : LangChain permettra de construire les composants de l'application, tandis que LangGraph permettra d'orchestrer les systèmes agentiques complexes, contrôlables et persistants.
 
 ---
 
