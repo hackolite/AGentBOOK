@@ -6999,157 +6999,3167 @@ Le contrat de données est le point de jonction entre le monde non déterministe
 - 7.10 Validation des arguments
 - 7.11 Exemple : agent capable d'interroger une API
 - 7.12 Exemple : agent capable d'interroger une base de données
+
 ## Partie VI — Construire des Agents
 
 ### Chapitre 8 — Premier agent
-- 8.1 Workflow classique
-- 8.2 Agent simple
-- 8.3 Agent executor
-- 8.4 Boucle décision → action → observation
-- 8.5 Arrêt de l'agent
-- 8.6 Nombre maximal d'itérations
-- 8.7 Gestion des erreurs
-- 8.8 Hallucinations et mauvais tool calls
-- 8.9 Guardrails
-- 8.10 Quand ne pas utiliser un agent
+
+Le chapitre précédent a présenté les tools comme des fonctions que le modèle peut appeler. Ce chapitre franchit l'étape suivante : construire un **agent**, c'est-à-dire un système dans lequel le modèle décide lui-même quand et comment utiliser les tools, dans une boucle d'exécution autonome.
+
+#### 8.1 Workflow classique
+
+Avant d'introduire l'agent, il est utile de rappeler comment fonctionne un workflow classique orienté LLM.
+
+Dans un **workflow déterministe**, l'ordre des étapes est fixé par le développeur :
+
+```mermaid
+graph TD
+    N1["Événement caméra"]
+    N2["Extraction données (tool)"]
+    N3["Analyse LLM"]
+    N4["Génération alerte (tool)"]
+    N5["Notification envoyée"]
+
+    N1 --> N2
+    N2 --> N3
+    N3 --> N4
+    N4 --> N5
+```
+
+Ce workflow fonctionne bien quand les étapes sont connues à l'avance. Mais si la séquence doit varier selon le contexte — interroger une API ou une base de données selon la nature de l'événement, par exemple — un agent est plus adapté.
+
+#### 8.2 Agent simple
+
+Un agent dans LangChain, dans sa forme la plus simple, combine un modèle avec une liste de tools. Le modèle décide quelle action effectuer, exécute le tool, observe le résultat, et répète jusqu'à produire une réponse finale.
+
+```mermaid
+graph TD
+    N10["Objectif / Question"]
+    N11["Agent (LLM + tools)"]
+    N12["Décision : quel tool ?"]
+    N13["Exécution du tool"]
+    N14["Observation"]
+    N15{"Tâche terminée ?"}
+    N16["Réponse finale"]
+
+    N10 --> N11
+    N11 --> N12
+    N12 --> N13
+    N13 --> N14
+    N14 --> N15
+    N15 -- Non --> N11
+    N15 -- Oui --> N16
+```
+
+#### 8.3 Agent executor
+
+LangChain fournit `create_react_agent` et `AgentExecutor` pour construire rapidement ce type de boucle.
+
+```python
+from langchain_openai import ChatOpenAI
+from langchain.agents import AgentExecutor, create_react_agent
+from langchain_core.tools import tool
+from langchain import hub
+
+
+@tool
+def get_zone_occupancy(zone_id: str) -> dict:
+    """Retourne l'occupation et le bruit d'une zone du magasin."""
+    # Simulation d'une API interne
+    data = {
+        "zone_a": {"count": 87, "noise_db": 74, "threshold": 70},
+        "zone_b": {"count": 23, "noise_db": 52, "threshold": 70},
+        "caisse": {"count": 142, "noise_db": 81, "threshold": 75},
+    }
+    return data.get(zone_id.lower(), {"error": "zone inconnue"})
+
+
+@tool
+def create_alert(zone_id: str, reason: str, severity: str) -> str:
+    """Crée une alerte dans le système de gestion du site."""
+    # En production : appel API ou écriture BDD
+    print(f"[ALERT] zone={zone_id} reason={reason} severity={severity}")
+    return f"Alerte créée pour {zone_id} : {reason} ({severity})"
+
+
+tools = [get_zone_occupancy, create_alert]
+
+model = ChatOpenAI(model="gpt-4o", temperature=0)
+
+prompt = hub.pull("hwchase17/react")
+
+agent = create_react_agent(model, tools, prompt)
+executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
+
+result = executor.invoke({
+    "input": (
+        "Vérifie l'occupation de la zone caisse. "
+        "Si le bruit dépasse le seuil, crée une alerte de sévérité haute."
+    )
+})
+
+print(result["output"])
+```
+
+#### 8.4 Boucle décision → action → observation
+
+Le cycle fondamental de tout agent est :
+
+1. **Décision** : le modèle lit le contexte et choisit une action.
+2. **Action** : le tool est exécuté avec les paramètres choisis.
+3. **Observation** : le résultat est ajouté au contexte.
+4. **Décision suivante** : le modèle relit le contexte enrichi.
+
+```mermaid
+graph TD
+    N20["Contexte initial"]
+    N21["LLM — choisit l'action"]
+    N22["Tool call"]
+    N23["Résultat du tool"]
+    N24["Contexte enrichi"]
+    N25{"Fin ?"}
+    N26["Réponse"]
+
+    N20 --> N21
+    N21 --> N22
+    N22 --> N23
+    N23 --> N24
+    N24 --> N25
+    N25 -- Non --> N21
+    N25 -- Oui --> N26
+```
+
+Chaque observation s'ajoute au contexte transmis au modèle. L'agent accumule ainsi les informations jusqu'à produire une réponse finale.
+
+#### 8.5 Arrêt de l'agent
+
+Un agent sans mécanisme d'arrêt peut boucler indéfiniment. LangChain propose plusieurs mécanismes pour contrôler l'arrêt :
+
+- **`AgentFinish`** : signal explicite que l'agent a terminé sa tâche ;
+- **`max_iterations`** : nombre maximal d'étapes autorisées ;
+- **`max_execution_time`** : timeout global en secondes ;
+- **condition de sortie explicite dans le prompt** : formulée comme une instruction.
+
+#### 8.6 Nombre maximal d'itérations
+
+```python
+executor = AgentExecutor(
+    agent=agent,
+    tools=tools,
+    max_iterations=10,
+    max_execution_time=30.0,  # secondes
+    verbose=True,
+)
+```
+
+Si la limite est atteinte, l'agent retourne la meilleure réponse partielle disponible.
+
+#### 8.7 Gestion des erreurs
+
+Un tool peut échouer : indisponibilité d'API, données manquantes, timeout réseau. LangChain propose `handle_tool_errors` :
+
+```python
+executor = AgentExecutor(
+    agent=agent,
+    tools=tools,
+    handle_tool_error=True,  # l'agent tente de récupérer l'erreur
+    verbose=True,
+)
+```
+
+Avec `handle_tool_error=True`, une erreur de tool est transmise comme observation au modèle, qui peut décider de retenter avec des paramètres différents ou d'emprunter un chemin alternatif.
+
+Pour des cas plus précis, on peut personnaliser le message d'erreur :
+
+```python
+from langchain_core.tools import ToolException
+
+
+@tool
+def get_zone_occupancy(zone_id: str) -> dict:
+    """Retourne l'occupation d'une zone."""
+    valid_zones = ["zone_a", "zone_b", "caisse"]
+    if zone_id.lower() not in valid_zones:
+        raise ToolException(
+            f"Zone inconnue : '{zone_id}'. "
+            f"Zones valides : {valid_zones}"
+        )
+    # ... logique réelle
+    return {"count": 42, "noise_db": 65}
+```
+
+#### 8.8 Hallucinations et mauvais tool calls
+
+Un modèle peut produire des tool calls incorrects :
+
+- **paramètre inventé** : valeur qui n'existe pas dans le système ;
+- **tool inexistant** : modèle hallucine un nom de tool ;
+- **logique incorrecte** : enchaînement erroné des actions.
+
+Stratégies de mitigation :
+
+- utiliser le **Structured Output** pour valider les paramètres ;
+- valider explicitement les arguments dans le tool ;
+- fournir un **prompt système clair** listant les tools disponibles et leurs usages exacts ;
+- ajouter des exemples few-shot dans le prompt.
+
+#### 8.9 Guardrails
+
+Les guardrails sont des contrôles placés avant ou après l'exécution d'un tool :
+
+```python
+from langchain_core.tools import tool
+
+
+ALLOWED_ZONES = {"zone_a", "zone_b", "caisse", "entree", "reserve"}
+
+
+@tool
+def get_zone_occupancy(zone_id: str) -> dict:
+    """Retourne l'occupation d'une zone du magasin."""
+    # Guardrail : validation de la zone
+    if zone_id.lower() not in ALLOWED_ZONES:
+        return {
+            "error": f"Zone '{zone_id}' non autorisée.",
+            "zones_valides": list(ALLOWED_ZONES),
+        }
+    # Guardrail : rate limiting simulé
+    # En production : vérifier un compteur Redis ou similaire
+    return {"zone_id": zone_id, "count": 56, "noise_db": 68}
+```
+
+On peut aussi placer des guardrails **au niveau de l'agent**, avant ou après chaque appel LLM.
+
+#### 8.10 Quand ne pas utiliser un agent
+
+Un agent introduit de la latence, de l'imprévisibilité et du coût. Il n'est pas toujours justifié.
+
+| Situation | Architecture recommandée |
+|-----------|--------------------------|
+| Tâche unique et prévisible | Appel LLM direct |
+| Séquence d'étapes connues à l'avance | Workflow déterministe |
+| Extraction de données depuis un texte | Structured output |
+| Récupération de documents pertinents | RAG simple |
+| Décision dynamique sur plusieurs sources | Agent |
+| Boucle de décision → action → observation | Agent |
+
+Règle pratique : **commence par le pipeline le plus simple. Ajoute un agent uniquement si un workflow déterministe ne peut pas couvrir tous les cas.**
+
+---
+
+## 🎯 Questions Challenge
+
+> **Question 1** : Quelle est la différence entre un workflow déterministe et un agent dans LangChain ? Donne un exemple concret en contexte retail.
+> **Question 2** : Quelles stratégies mettrais-tu en place pour éviter qu'un agent boucle infiniment sur une tâche de monitoring de site ?
+> **Question 3** : Décris un cas d'usage dans lequel un agent serait contre-productif par rapport à un simple pipeline.
+
+---
+
 ### Chapitre 9 — Concevoir un agent robuste
-- 9.1 Définir clairement le rôle de l'agent
-- 9.2 Limiter l'espace d'action
-- 9.3 Validation des actions
-- 9.4 Permissions
-- 9.5 Budget d'exécution
-- 9.6 Limite de tokens
-- 9.7 Timeout
-- 9.8 Maximum d'itérations
-- 9.9 Détection des boucles infinies
-- 9.10 Observabilité
-- 9.11 Évaluation
+
+Construire un agent qui fonctionne en démonstration est simple. Construire un agent qui fonctionne en production, de manière fiable, traçable et contrôlable, est un vrai défi d'ingénierie. Ce chapitre couvre les principes essentiels.
+
+#### 9.1 Définir clairement le rôle de l'agent
+
+Un agent sans rôle précis est un agent dangereux. Avant d'écrire une ligne de code, définis :
+
+- **l'objectif** : que doit accomplir l'agent ?
+- **le périmètre** : quelles données peut-il lire ? Quelles actions peut-il effectuer ?
+- **les contraintes** : quelles actions sont absolument interdites ?
+- **le cas nominal** : comment se déroule le flux le plus courant ?
+- **les cas dégradés** : que doit faire l'agent si un tool échoue ?
+
+Exemple pour un agent de surveillance de site retail :
+
+```python
+SYSTEM_PROMPT = """
+Tu es un agent de surveillance de site retail.
+
+Tes responsabilités :
+- Vérifier l'occupation et le bruit des zones sur demande
+- Créer des alertes si un seuil est dépassé
+- Résumer l'état global du site
+
+Limites absolues :
+- Tu ne peux pas modifier les seuils de configuration
+- Tu ne peux pas supprimer des alertes
+- Tu ne peux pas accéder aux données clients
+
+Si tu ne peux pas accomplir une tâche avec les tools disponibles,
+explique pourquoi plutôt que d'inventer une réponse.
+"""
+```
+
+#### 9.2 Limiter l'espace d'action
+
+Plus l'agent a de tools, plus le risque d'utilisation incorrecte augmente. Ne fournir que les tools **strictement nécessaires** pour la tâche en cours.
+
+```mermaid
+graph TD
+    N30["Agent surveillance"]
+    N31["get_zone_occupancy"]
+    N32["create_alert"]
+    N33["get_site_summary"]
+
+    N30 --> N31
+    N30 --> N32
+    N30 --> N33
+
+    N34["❌ Hors périmètre"]
+    N35["delete_alert"]
+    N36["modify_config"]
+    N37["access_customer_data"]
+
+    N34 --> N35
+    N34 --> N36
+    N34 --> N37
+```
+
+#### 9.3 Validation des actions
+
+Avant d'exécuter une action avec effets de bord (écriture, notification, modification), valide toujours les paramètres :
+
+```python
+from pydantic import BaseModel, Field, field_validator
+from langchain_core.tools import tool
+
+
+class AlertInput(BaseModel):
+    zone_id: str = Field(description="Identifiant de la zone concernée")
+    reason: str = Field(description="Raison de l'alerte")
+    severity: str = Field(description="Sévérité : low, medium, high, critical")
+
+    @field_validator("severity")
+    @classmethod
+    def validate_severity(cls, v: str) -> str:
+        allowed = {"low", "medium", "high", "critical"}
+        if v.lower() not in allowed:
+            raise ValueError(f"Sévérité invalide : {v}. Valeurs autorisées : {allowed}")
+        return v.lower()
+
+    @field_validator("zone_id")
+    @classmethod
+    def validate_zone(cls, v: str) -> str:
+        allowed = {"zone_a", "zone_b", "caisse", "entree", "reserve"}
+        if v.lower() not in allowed:
+            raise ValueError(f"Zone invalide : {v}")
+        return v.lower()
+
+
+@tool(args_schema=AlertInput)
+def create_alert(zone_id: str, reason: str, severity: str) -> str:
+    """Crée une alerte dans le système de gestion du site."""
+    print(f"[ALERT] zone={zone_id} | reason={reason} | severity={severity}")
+    return f"Alerte {severity} créée pour {zone_id} : {reason}"
+```
+
+#### 9.4 Permissions
+
+Un agent de production doit fonctionner sous un **principe de moindre privilège** : ne donner que les permissions strictement nécessaires.
+
+Architecture recommandée :
+
+```mermaid
+graph TD
+    N40["Requête utilisateur"]
+    N41["Agent"]
+    N42["Tool proxy"]
+    N43["Vérification permissions"]
+    N44["API / BDD interne"]
+    N45{"Autorisé ?"}
+    N46["Exécution"]
+    N47["Refus + log"]
+
+    N40 --> N41
+    N41 --> N42
+    N42 --> N43
+    N43 --> N45
+    N45 -- Oui --> N44
+    N44 --> N46
+    N45 -- Non --> N47
+```
+
+#### 9.5 Budget d'exécution
+
+Définir des limites explicites sur les ressources consommées :
+
+```python
+executor = AgentExecutor(
+    agent=agent,
+    tools=tools,
+    max_iterations=15,          # Nombre maximum de tours
+    max_execution_time=60.0,    # Timeout total en secondes
+    early_stopping_method="generate",  # Génère une réponse partielle si timeout
+    verbose=True,
+)
+```
+
+#### 9.6 Limite de tokens
+
+Un agent qui boucle accumule du contexte à chaque itération. Sans contrôle, la fenêtre de contexte se remplit, puis l'appel échoue ou coûte très cher.
+
+Stratégies :
+
+- **tronquer l'historique** : ne conserver que les N derniers échanges ;
+- **résumer périodiquement** : condenser l'historique en un résumé ;
+- **streaming** : traiter les résultats au fil de l'eau sans accumuler inutilement.
+
+#### 9.7 Timeout
+
+En plus du timeout global de l'agent, ajouter un timeout sur chaque appel tool individuel :
+
+```python
+import asyncio
+from langchain_core.tools import tool
+
+
+@tool
+async def get_external_api_data(endpoint: str) -> dict:
+    """Interroge une API externe avec timeout."""
+    try:
+        async with asyncio.timeout(5.0):  # 5 secondes max
+            # ... appel API réel
+            return {"status": "ok", "data": {}}
+    except asyncio.TimeoutError:
+        return {"error": "timeout", "endpoint": endpoint}
+```
+
+#### 9.8 Maximum d'itérations
+
+Chaque itération de l'agent coûte au moins un appel LLM. 10 itérations × 1000 tokens = 10 000 tokens minimum. En production :
+
+- définir `max_iterations` selon le coût acceptable par requête ;
+- monitorer le nombre moyen d'itérations ;
+- alerter si la moyenne dépasse un seuil.
+
+#### 9.9 Détection des boucles infinies
+
+Un agent peut se retrouver à appeler le même tool avec les mêmes paramètres indéfiniment. Stratégies de détection :
+
+```python
+from collections import Counter
+
+
+class LoopDetector:
+    """Détecte les boucles dans les appels d'outils de l'agent."""
+
+    def __init__(self, max_repeats: int = 3):
+        self.max_repeats = max_repeats
+        self.call_counter: Counter = Counter()
+
+    def check(self, tool_name: str, args_key: str) -> bool:
+        """Retourne True si une boucle est détectée."""
+        key = f"{tool_name}:{args_key}"
+        self.call_counter[key] += 1
+        return self.call_counter[key] >= self.max_repeats
+```
+
+#### 9.10 Observabilité
+
+Un agent sans traces est une boîte noire inutilisable en production. Intégrer LangSmith dès le début :
+
+```python
+import os
+
+
+os.environ["LANGCHAIN_TRACING_V2"] = "true"
+os.environ["LANGCHAIN_PROJECT"] = "retail-surveillance-agent"
+# LANGCHAIN_API_KEY doit être dans .env
+```
+
+Chaque trace capture :
+- les messages échangés avec le modèle ;
+- les tool calls et leurs résultats ;
+- la latence par étape ;
+- le nombre de tokens consommés.
+
+#### 9.11 Évaluation
+
+Un agent de production doit être évalué régulièrement sur un **dataset de test** représentatif des cas réels :
+
+- **trajectoire** : l'agent a-t-il emprunté le bon chemin d'outils ?
+- **résultat final** : la réponse est-elle correcte ?
+- **sécurité** : l'agent a-t-il respecté ses limites ?
+- **efficacité** : combien d'itérations pour atteindre le résultat ?
+
+```mermaid
+graph TD
+    N50["Dataset de test"]
+    N51["Exécution de l'agent"]
+    N52["Résultat réel"]
+    N53["Résultat attendu"]
+    N54["Évaluateur (LLM ou règles)"]
+    N55["Score & rapport"]
+
+    N50 --> N51
+    N51 --> N52
+    N52 --> N54
+    N53 --> N54
+    N54 --> N55
+```
+
+---
+
+## 🎯 Questions Challenge
+
+> **Question 1** : Quelles sont les trois premières mesures que tu prendrais pour rendre un agent de surveillance retail fiable en production ?
+> **Question 2** : Comment détecter qu'un agent boucle sur un outil sans modifier le code de l'agent lui-même ?
+> **Question 3** : Décris la différence entre `max_iterations` et `max_execution_time` et dans quels cas privilégier l'un ou l'autre.
+
+---
+
 ## Partie VII — RAG avec LangChain
 
 ### Chapitre 10 — Comprendre le RAG
-- 10.1 Pourquoi utiliser le RAG
-- 10.2 Knowledge base
-- 10.3 Documents
-- 10.4 Document loaders
-- 10.5 Chunking
-- 10.6 Embeddings
-- 10.7 Vector stores
-- 10.8 Similarity search
-- 10.9 Retriever
-- 10.10 Génération augmentée par récupération
+
+Un LLM a une connaissance figée au moment de son entraînement. Il ne connaît pas vos données métier, vos plans de site, vos fiches produits ni vos historiques d'alertes. Le **RAG** (Retrieval-Augmented Generation) résout ce problème en permettant au modèle de consulter dynamiquement une base de connaissances externe.
+
+#### 10.1 Pourquoi utiliser le RAG
+
+Sans RAG, le modèle ne peut répondre qu'à partir de sa connaissance d'entraînement. Avec le RAG :
+
+```mermaid
+graph TD
+    N60["Question utilisateur"]
+    N61["Retriever"]
+    N62["Base documentaire"]
+    N63["Documents pertinents"]
+    N64["LLM + contexte enrichi"]
+    N65["Réponse ancrée"]
+
+    N60 --> N61
+    N61 --> N62
+    N62 --> N63
+    N63 --> N64
+    N60 --> N64
+    N64 --> N65
+```
+
+Cas d'usage typiques en retail et spatial intelligence :
+- recherche dans une base de plans de site ;
+- consultation de fiches produit ;
+- interrogation de règlements de sécurité ;
+- accès à l'historique d'incidents ;
+- analyse de rapports d'affluence.
+
+#### 10.2 Knowledge base
+
+La **knowledge base** est la source de vérité externe. Elle peut contenir :
+- des documents PDF (plans, règlements, rapports) ;
+- des pages web internes ;
+- des bases de données structurées ;
+- des notes opérationnelles.
+
+#### 10.3 Documents
+
+Dans LangChain, un `Document` est une unité d'information indexable :
+
+```python
+from langchain_core.documents import Document
+
+
+doc = Document(
+    page_content=(
+        "La zone caisse du site Lyon-Part-Dieu dispose de 12 postes. "
+        "Le seuil d'alerte sonore est de 75 dB. "
+        "En cas de dépassement, alerter le responsable de caisse."
+    ),
+    metadata={
+        "site": "lyon_part_dieu",
+        "zone": "caisse",
+        "type": "configuration",
+        "version": "2025-01",
+    },
+)
+```
+
+Les **métadonnées** sont clés : elles permettent le filtrage contextuel lors du retrieval.
+
+#### 10.4 Document loaders
+
+LangChain propose des loaders pour de nombreux formats :
+
+```python
+from langchain_community.document_loaders import (
+    PyPDFLoader,
+    TextLoader,
+    CSVLoader,
+    JSONLoader,
+)
+
+
+# Chargement d'un plan de site PDF
+loader = PyPDFLoader("plans/site_lyon.pdf")
+docs = loader.load()
+
+# Chargement de logs CSV d'occupation
+loader_csv = CSVLoader(
+    file_path="data/occupancy_logs.csv",
+    metadata_columns=["site_id", "zone_id", "date"],
+)
+docs_csv = loader_csv.load()
+```
+
+#### 10.5 Chunking
+
+Un document entier est souvent trop long pour être transmis au modèle. Le **chunking** le divise en fragments exploitables.
+
+```python
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+
+splitter = RecursiveCharacterTextSplitter(
+    chunk_size=500,
+    chunk_overlap=50,
+    separators=["\n\n", "\n", ". ", " ", ""],
+)
+
+chunks = splitter.split_documents(docs)
+print(f"{len(chunks)} fragments créés")
+```
+
+Stratégies de chunking :
+- **taille fixe** : simple mais peut couper des phrases importantes ;
+- **sémantique** : respect des frontières naturelles du texte ;
+- **par section** : idéal pour les documents structurés.
+
+#### 10.6 Embeddings
+
+Les **embeddings** transforment un texte en vecteur numérique capturant sa signification sémantique.
+
+```python
+from langchain_openai import OpenAIEmbeddings
+
+
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+
+# Exemple de transformation
+vector = embeddings.embed_query("affluence caisse en heure de pointe")
+print(f"Dimension du vecteur : {len(vector)}")
+# Dimension du vecteur : 1536
+```
+
+Deux textes sémantiquement proches auront des vecteurs proches dans l'espace vectoriel.
+
+#### 10.7 Vector stores
+
+Un **vector store** stocke les embeddings et permet la recherche par similarité.
+
+```python
+from langchain_community.vectorstores import FAISS
+from langchain_openai import OpenAIEmbeddings
+
+
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+
+# Création de l'index
+vector_store = FAISS.from_documents(chunks, embeddings)
+
+# Sauvegarde locale
+vector_store.save_local("indexes/site_knowledge")
+
+# Rechargement
+vector_store = FAISS.load_local(
+    "indexes/site_knowledge",
+    embeddings,
+    allow_dangerous_deserialization=True,
+)
+```
+
+Options courantes :
+- **FAISS** : rapide, local, adapté aux prototypes ;
+- **Chroma** : persistant, simple à déployer ;
+- **Pinecone** : cloud managé, scalable ;
+- **pgvector** : extension PostgreSQL, idéale si tu as déjà Postgres.
+
+#### 10.8 Similarity search
+
+```python
+# Recherche des 4 fragments les plus pertinents
+results = vector_store.similarity_search(
+    query="seuil sonore zone caisse",
+    k=4,
+    filter={"site": "lyon_part_dieu"},  # Filtrage par métadonnée
+)
+
+for doc in results:
+    print(doc.page_content)
+    print(doc.metadata)
+```
+
+#### 10.9 Retriever
+
+Un `Retriever` est l'interface standard de recherche dans LangChain :
+
+```python
+retriever = vector_store.as_retriever(
+    search_type="similarity",
+    search_kwargs={"k": 4},
+)
+
+docs = retriever.invoke("procédure en cas de bruit excessif")
+```
+
+#### 10.10 Génération augmentée par récupération
+
+La chaîne RAG complète :
+
+```python
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
+
+
+model = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+prompt = ChatPromptTemplate.from_template(
+    """Tu es un assistant expert en gestion de site retail.
+Utilise uniquement les informations ci-dessous pour répondre.
+Si l'information n'est pas disponible, dis-le clairement.
+
+Contexte :
+{context}
+
+Question : {question}
+"""
+)
+
+rag_chain = (
+    {
+        "context": retriever,
+        "question": RunnablePassthrough(),
+    }
+    | prompt
+    | model
+    | StrOutputParser()
+)
+
+response = rag_chain.invoke("Quel est le seuil sonore de la zone caisse à Lyon ?")
+print(response)
+```
+
+---
+
+## 🎯 Questions Challenge
+
+> **Question 1** : Pourquoi la qualité du chunking a-t-elle autant d'impact sur la qualité des réponses RAG ?
+> **Question 2** : Quelles métadonnées inclurais-tu dans les documents d'un système RAG pour un site retail multisite ?
+> **Question 3** : Dans quel cas précis préférerais-tu `pgvector` à FAISS pour un système de production ?
+
+---
+
 ### Chapitre 11 — Construire un RAG complet
-- 11.1 Ingestion
-- 11.2 Nettoyage
-- 11.3 Chunking
-- 11.4 Embedding
-- 11.5 Indexation
-- 11.6 Retrieval
-- 11.7 Reranking
-- 11.8 Context assembly
-- 11.9 Génération
-- 11.10 Citations
-- 11.11 Evaluation du retrieval
-- 11.12 Evaluation de la réponse
+
+Ce chapitre guide la construction d'un pipeline RAG complet et robuste, de l'ingestion des données jusqu'à la génération de réponses citées.
+
+#### 11.1 Ingestion
+
+L'ingestion est la phase de collecte des documents sources. En production, elle doit être automatisée et incrémentale.
+
+```python
+import os
+from pathlib import Path
+from langchain_community.document_loaders import (
+    PyPDFLoader,
+    TextLoader,
+    CSVLoader,
+)
+from langchain_core.documents import Document
+from typing import List
+
+
+def load_site_documents(data_dir: str) -> List[Document]:
+    """Charge tous les documents d'un répertoire de site."""
+    docs: List[Document] = []
+    data_path = Path(data_dir)
+
+    for pdf_file in data_path.glob("**/*.pdf"):
+        loader = PyPDFLoader(str(pdf_file))
+        docs.extend(loader.load())
+
+    for txt_file in data_path.glob("**/*.txt"):
+        loader = TextLoader(str(txt_file), encoding="utf-8")
+        docs.extend(loader.load())
+
+    for csv_file in data_path.glob("**/*.csv"):
+        loader = CSVLoader(file_path=str(csv_file))
+        docs.extend(loader.load())
+
+    print(f"{len(docs)} documents chargés depuis {data_dir}")
+    return docs
+```
+
+#### 11.2 Nettoyage
+
+Avant d'indexer, nettoyer les documents pour améliorer la qualité du retrieval :
+
+```python
+import re
+from langchain_core.documents import Document
+from typing import List
+
+
+def clean_documents(docs: List[Document]) -> List[Document]:
+    """Nettoie les documents : espaces, caractères parasites, pages vides."""
+    cleaned = []
+    for doc in docs:
+        content = doc.page_content
+        # Supprimer les espaces multiples
+        content = re.sub(r"\s+", " ", content).strip()
+        # Ignorer les pages quasi-vides
+        if len(content) < 50:
+            continue
+        cleaned.append(Document(page_content=content, metadata=doc.metadata))
+    return cleaned
+```
+
+#### 11.3 Chunking
+
+Pour un système retail, un chunking sémantique par section est souvent préférable au chunking par taille fixe :
+
+```python
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+
+def chunk_documents(docs, chunk_size=600, chunk_overlap=80):
+    """Découpe les documents en fragments avec recouvrement."""
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=["\n\n", "\n", ". ", "! ", "? ", " ", ""],
+        add_start_index=True,
+    )
+    chunks = splitter.split_documents(docs)
+    print(f"{len(chunks)} fragments générés")
+    return chunks
+```
+
+#### 11.4 Embedding
+
+```python
+from langchain_openai import OpenAIEmbeddings
+
+
+def get_embeddings():
+    """Retourne le modèle d'embedding configuré."""
+    return OpenAIEmbeddings(
+        model="text-embedding-3-small",
+        dimensions=1536,
+    )
+```
+
+#### 11.5 Indexation
+
+```python
+from langchain_community.vectorstores import FAISS
+
+
+def build_index(chunks, embeddings, index_path: str):
+    """Construit et sauvegarde l'index vectoriel."""
+    vector_store = FAISS.from_documents(chunks, embeddings)
+    vector_store.save_local(index_path)
+    print(f"Index sauvegardé dans {index_path}")
+    return vector_store
+
+
+def load_index(index_path: str, embeddings):
+    """Charge un index vectoriel existant."""
+    return FAISS.load_local(
+        index_path,
+        embeddings,
+        allow_dangerous_deserialization=True,
+    )
+```
+
+#### 11.6 Retrieval
+
+```python
+def get_retriever(vector_store, k: int = 4, site_id: str = None):
+    """Retourne un retriever configuré avec filtrage optionnel."""
+    search_kwargs = {"k": k}
+    if site_id:
+        search_kwargs["filter"] = {"site_id": site_id}
+
+    return vector_store.as_retriever(
+        search_type="similarity_score_threshold",
+        search_kwargs={**search_kwargs, "score_threshold": 0.7},
+    )
+```
+
+#### 11.7 Reranking
+
+Le reranking améliore la pertinence en réordonnant les résultats du retrieval :
+
+```python
+from langchain.retrievers import ContextualCompressionRetriever
+from langchain.retrievers.document_compressors import CrossEncoderReranker
+from langchain_community.cross_encoders import HuggingFaceCrossEncoder
+
+
+model = HuggingFaceCrossEncoder(model_name="BAAI/bge-reranker-base")
+compressor = CrossEncoderReranker(model=model, top_n=3)
+
+compression_retriever = ContextualCompressionRetriever(
+    base_compressor=compressor,
+    base_retriever=get_retriever(vector_store),
+)
+```
+
+#### 11.8 Context assembly
+
+Avant de transmettre les documents récupérés au modèle, les assembler de manière structurée :
+
+```python
+from langchain_core.documents import Document
+from typing import List
+
+
+def format_context(docs: List[Document]) -> str:
+    """Formate les documents récupérés en contexte structuré."""
+    parts = []
+    for i, doc in enumerate(docs, 1):
+        meta = doc.metadata
+        source = meta.get("source", "inconnue")
+        zone = meta.get("zone", "")
+        header = f"[Source {i} — {source}"
+        if zone:
+            header += f" — Zone : {zone}"
+        header += "]"
+        parts.append(f"{header}\n{doc.page_content}")
+    return "\n\n---\n\n".join(parts)
+```
+
+#### 11.9 Génération
+
+```python
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough, RunnableLambda
+
+
+model = ChatOpenAI(model="gpt-4o", temperature=0)
+
+prompt = ChatPromptTemplate.from_template(
+    """Tu es un assistant expert en gestion de site retail.
+Réponds uniquement à partir des sources fournies.
+Si l'information est absente des sources, indique-le explicitement.
+
+Sources :
+{context}
+
+Question : {question}
+
+Réponse (cite les sources utilisées) :
+"""
+)
+
+rag_chain = (
+    {
+        "context": retriever | RunnableLambda(format_context),
+        "question": RunnablePassthrough(),
+    }
+    | prompt
+    | model
+    | StrOutputParser()
+)
+```
+
+#### 11.10 Citations
+
+Pour forcer des citations structurées, utiliser le Structured Output :
+
+```python
+from pydantic import BaseModel, Field
+from typing import List
+from langchain_openai import ChatOpenAI
+
+
+class RAGResponse(BaseModel):
+    answer: str = Field(description="Réponse à la question")
+    sources: List[str] = Field(description="Identifiants des sources utilisées")
+    confidence: str = Field(description="Niveau de confiance : high, medium, low")
+
+
+model = ChatOpenAI(model="gpt-4o", temperature=0)
+structured_model = model.with_structured_output(RAGResponse)
+```
+
+#### 11.11 Évaluation du retrieval
+
+Métriques clés :
+
+- **Recall@k** : proportion de documents pertinents récupérés parmi les k premiers ;
+- **Precision@k** : proportion de documents pertinents parmi les k résultats ;
+- **MRR** (Mean Reciprocal Rank) : position moyenne du premier document pertinent.
+
+```python
+def recall_at_k(retrieved_ids: list, relevant_ids: list, k: int) -> float:
+    """Calcule le recall@k."""
+    retrieved_k = set(retrieved_ids[:k])
+    relevant = set(relevant_ids)
+    if not relevant:
+        return 0.0
+    return len(retrieved_k & relevant) / len(relevant)
+```
+
+#### 11.12 Évaluation de la réponse
+
+Utiliser un LLM comme juge :
+
+```python
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+from pydantic import BaseModel, Field
+
+
+class RAGEvaluation(BaseModel):
+    faithfulness: int = Field(description="La réponse est-elle fidèle aux sources ? 1-5")
+    relevance: int = Field(description="La réponse répond-elle à la question ? 1-5")
+    comment: str = Field(description="Commentaire d'évaluation")
+
+
+eval_model = ChatOpenAI(model="gpt-4o", temperature=0)
+eval_model_structured = eval_model.with_structured_output(RAGEvaluation)
+
+eval_prompt = ChatPromptTemplate.from_template(
+    """Évalue cette réponse RAG.
+
+Question : {question}
+Sources fournies : {context}
+Réponse générée : {answer}
+
+Évalue la fidélité aux sources (faithfulness) et la pertinence (relevance) sur 5.
+"""
+)
+
+eval_chain = eval_prompt | eval_model_structured
+```
+
+---
+
+## 🎯 Questions Challenge
+
+> **Question 1** : Quelle stratégie de chunking choisirais-tu pour indexer les fiches de configuration d'un réseau de 200 sites retail ?
+> **Question 2** : Pourquoi le reranking améliore-t-il la qualité des réponses par rapport à un simple `similarity_search` ?
+> **Question 3** : Décris comment mesurer la qualité d'un système RAG sur un jeu de données de questions/réponses issu de l'opérationnel.
+
+---
+
 ### Chapitre 12 — RAG avancé
-- 12.1 Hybrid search
-- 12.2 Metadata filtering
-- 12.3 Multi-query retrieval
-- 12.4 Query rewriting
-- 12.5 Parent-child retrieval
-- 12.6 Reranking
-- 12.7 Context compression
-- 12.8 Agentic RAG
-- 12.9 RAG avec tools
-- 12.10 Quand préférer une base SQL à un vector store
+
+Un RAG de base fonctionne bien sur des questions simples. Pour des cas d'usage complexes — questions multi-aspects, données hétérogènes, sources mixtes — des techniques avancées sont nécessaires.
+
+#### 12.1 Hybrid search
+
+La recherche hybride combine la recherche vectorielle (sémantique) et la recherche par mots-clés (BM25) pour une meilleure couverture :
+
+```mermaid
+graph TD
+    N70["Requête"]
+    N71["Recherche vectorielle"]
+    N72["Recherche BM25"]
+    N73["Fusion des résultats (RRF)"]
+    N74["Documents fusionnés"]
+
+    N70 --> N71
+    N70 --> N72
+    N71 --> N73
+    N72 --> N73
+    N73 --> N74
+```
+
+```python
+from langchain_community.retrievers import BM25Retriever
+from langchain.retrievers import EnsembleRetriever
+
+
+bm25_retriever = BM25Retriever.from_documents(chunks)
+bm25_retriever.k = 4
+
+vector_retriever = vector_store.as_retriever(search_kwargs={"k": 4})
+
+ensemble_retriever = EnsembleRetriever(
+    retrievers=[bm25_retriever, vector_retriever],
+    weights=[0.4, 0.6],  # 40% BM25, 60% vectoriel
+)
+
+docs = ensemble_retriever.invoke("seuil alerte caisse lyon")
+```
+
+#### 12.2 Metadata filtering
+
+Filtrer les documents par métadonnées avant la recherche sémantique réduit le bruit et améliore la précision :
+
+```python
+# Retriever filtré sur un site spécifique
+retriever_lyon = vector_store.as_retriever(
+    search_kwargs={
+        "k": 4,
+        "filter": {
+            "site_id": "lyon_part_dieu",
+            "type": "configuration",
+        },
+    }
+)
+```
+
+Modèle de métadonnées recommandé pour un RAG retail :
+
+```python
+metadata = {
+    "site_id": "lyon_part_dieu",
+    "zone_id": "caisse",
+    "document_type": "configuration",  # configuration, incident, rapport, reglementation
+    "date": "2025-01-15",
+    "version": "v3.2",
+    "region": "aura",
+}
+```
+
+#### 12.3 Multi-query retrieval
+
+Une seule formulation de requête peut manquer des documents pertinents. Le multi-query génère plusieurs variantes :
+
+```python
+from langchain.retrievers.multi_query import MultiQueryRetriever
+from langchain_openai import ChatOpenAI
+
+
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.3)
+
+multi_query_retriever = MultiQueryRetriever.from_llm(
+    retriever=vector_retriever,
+    llm=llm,
+)
+
+# Génère automatiquement plusieurs variantes de la question
+docs = multi_query_retriever.invoke(
+    "que faire si le bruit dépasse le seuil en zone caisse ?"
+)
+```
+
+#### 12.4 Query rewriting
+
+Reformuler la requête pour améliorer le retrieval :
+
+```python
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+
+
+rewrite_prompt = ChatPromptTemplate.from_template(
+    """Tu es un expert en recherche documentaire pour des sites retail.
+Reformule cette question pour maximiser la récupération de documents pertinents.
+Rends la requête plus précise, technique si nécessaire.
+
+Question originale : {question}
+Question reformulée :"""
+)
+
+rewrite_chain = (
+    rewrite_prompt
+    | ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    | StrOutputParser()
+)
+
+rewritten = rewrite_chain.invoke({"question": "problème bruit caisse"})
+# → "Procédure de gestion d'un dépassement de seuil sonore en zone caisse"
+```
+
+#### 12.5 Parent-child retrieval
+
+Indexer des petits fragments (précision) mais retourner leurs parents (contexte) :
+
+```python
+from langchain.retrievers import ParentDocumentRetriever
+from langchain.storage import InMemoryStore
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import FAISS
+from langchain_openai import OpenAIEmbeddings
+
+
+parent_splitter = RecursiveCharacterTextSplitter(chunk_size=2000)
+child_splitter = RecursiveCharacterTextSplitter(chunk_size=400)
+
+vectorstore = FAISS.from_documents([], OpenAIEmbeddings())
+store = InMemoryStore()
+
+retriever = ParentDocumentRetriever(
+    vectorstore=vectorstore,
+    docstore=store,
+    child_splitter=child_splitter,
+    parent_splitter=parent_splitter,
+)
+
+retriever.add_documents(docs)
+```
+
+#### 12.6 Reranking
+
+Voir 11.7. En production, préférer un reranker léger (cross-encoder local) pour limiter la latence.
+
+#### 12.7 Context compression
+
+Compresser le contexte pour n'en conserver que la partie pertinente à la question :
+
+```python
+from langchain.retrievers import ContextualCompressionRetriever
+from langchain.retrievers.document_compressors import LLMChainExtractor
+from langchain_openai import ChatOpenAI
+
+
+compressor = LLMChainExtractor.from_llm(
+    ChatOpenAI(model="gpt-4o-mini", temperature=0)
+)
+
+compression_retriever = ContextualCompressionRetriever(
+    base_compressor=compressor,
+    base_retriever=vector_retriever,
+)
+```
+
+#### 12.8 Agentic RAG
+
+Au lieu d'un pipeline fixe, laisser un agent décider quand et comment récupérer de l'information :
+
+```mermaid
+graph TD
+    N80["Question"]
+    N81["Agent"]
+    N82{"Nécessite des docs ?"}
+    N83["RAG retrieval"]
+    N84["Documents"]
+    N85["LLM + contexte"]
+    N86["Réponse"]
+
+    N80 --> N81
+    N81 --> N82
+    N82 -- Oui --> N83
+    N83 --> N84
+    N84 --> N85
+    N82 -- Non --> N85
+    N85 --> N86
+```
+
+```python
+from langchain_core.tools import tool
+
+
+@tool
+def search_site_knowledge(query: str, site_id: str = None) -> str:
+    """
+    Recherche dans la base de connaissances du site.
+    Utilise pour toute question sur les configurations, procédures ou incidents.
+    """
+    retriever = get_retriever(vector_store, k=4, site_id=site_id)
+    docs = retriever.invoke(query)
+    return format_context(docs)
+```
+
+#### 12.9 RAG avec tools
+
+Combiner RAG et tools pour des requêtes mixtes (données temps réel + connaissances documentaires) :
+
+```mermaid
+graph TD
+    N90["Question mixte"]
+    N91["Agent"]
+    N92["Tool : données temps réel"]
+    N93["Tool : RAG documents"]
+    N94["Contexte combiné"]
+    N95["LLM"]
+    N96["Réponse enrichie"]
+
+    N90 --> N91
+    N91 --> N92
+    N91 --> N93
+    N92 --> N94
+    N93 --> N94
+    N94 --> N95
+    N95 --> N96
+```
+
+#### 12.10 Quand préférer une base SQL à un vector store
+
+| Cas d'usage | Recommandation |
+|-------------|----------------|
+| Données structurées, requêtes précises | SQL |
+| Recherche par similarité sémantique | Vector store |
+| Questions analytiques (agrégats, filtres) | SQL |
+| Recherche de documents par sens | Vector store |
+| Historique d'événements avec timestamps | SQL |
+| Base de connaissances non structurée | Vector store |
+| Les deux (hybride) | SQL + Vector store |
+
+---
+
+## 🎯 Questions Challenge
+
+> **Question 1** : Décris une architecture RAG hybride pour un agent capable de répondre à la fois sur des données temps réel (capteurs) et des documents de configuration.
+> **Question 2** : Dans quel cas le multi-query retrieval apporte-t-il le plus de valeur ?
+> **Question 3** : Quand préférer le parent-child retrieval par rapport au chunking standard ?
+
+---
+
 ## Partie VIII — LangGraph
 
 ### Chapitre 13 — Pourquoi LangGraph ?
-- 13.1 Limites des agents simples
-- 13.2 Workflow complexe
-- 13.3 State machine
-- 13.4 Graphes
-- 13.5 LangGraph comme moteur d'orchestration
-- 13.6 Agent déterministe vs agent dynamique
+
+LangChain suffit pour construire des agents simples. Mais dès qu'un workflow agentique devient complexe — plusieurs branches de décision, plusieurs agents, états persistants, approbations humaines — un cadre plus structuré devient nécessaire. C'est le rôle de **LangGraph**.
+
+#### 13.1 Limites des agents simples
+
+Un `AgentExecutor` classique présente des limites importantes en production :
+
+- **pas de contrôle fin du flux** : on ne peut pas forcer certains nœuds ou certaines transitions ;
+- **état implicite** : le contexte est géré en mémoire sans schéma défini ;
+- **pas de persistence native** : si le processus s'arrête, l'état est perdu ;
+- **pas d'interruption structurée** : impossible de demander une validation humaine à un point précis.
+
+```mermaid
+graph TD
+    N100["AgentExecutor simple"]
+    N101["❌ Flux non contrôlable"]
+    N102["❌ État implicite"]
+    N103["❌ Pas de persistence"]
+    N104["❌ Pas d'interruption structurée"]
+
+    N100 --> N101
+    N100 --> N102
+    N100 --> N103
+    N100 --> N104
+```
+
+#### 13.2 Workflow complexe
+
+Un système de surveillance retail peut nécessiter :
+- une analyse de l'image caméra ;
+- une vérification en base de données ;
+- une décision conditionnelle (alerte ou non) ;
+- une approbation humaine pour les actions critiques ;
+- un enregistrement de l'événement.
+
+Ce type de flux ne peut pas être géré proprement avec un agent simple.
+
+#### 13.3 State machine
+
+LangGraph structure les agents comme des **machines à états** : des nœuds de traitement reliés par des transitions explicites.
+
+```mermaid
+graph TD
+    N110["START"]
+    N111["Analyse image"]
+    N112["Requête base de données"]
+    N113{"Seuil dépassé ?"}
+    N114["Créer alerte"]
+    N115["Approbation humaine"]
+    N116["Enregistrement"]
+    N117["END"]
+
+    N110 --> N111
+    N111 --> N112
+    N112 --> N113
+    N113 -- Oui --> N114
+    N113 -- Non --> N116
+    N114 --> N115
+    N115 --> N116
+    N116 --> N117
+```
+
+#### 13.4 Graphes
+
+Dans LangGraph, un graphe est composé de :
+- **nœuds** (nodes) : fonctions de traitement ;
+- **arêtes** (edges) : transitions entre nœuds ;
+- **arêtes conditionnelles** : transitions basées sur l'état ;
+- **état partagé** : structure de données commune à tous les nœuds.
+
+#### 13.5 LangGraph comme moteur d'orchestration
+
+LangGraph ne remplace pas LangChain : il l'orchestre. Les nœuds d'un graphe LangGraph utilisent les mêmes composants LangChain (modèles, tools, prompts, retrievers).
+
+```mermaid
+graph TD
+    N120["LangGraph (orchestration)"]
+    N121["Nœud 1 — LangChain Chain"]
+    N122["Nœud 2 — LangChain Agent"]
+    N123["Nœud 3 — LangChain RAG"]
+    N124["Nœud 4 — Logique Python"]
+
+    N120 --> N121
+    N120 --> N122
+    N120 --> N123
+    N120 --> N124
+```
+
+#### 13.6 Agent déterministe vs agent dynamique
+
+| Dimension | Agent déterministe | Agent dynamique |
+|-----------|-------------------|-----------------|
+| Flux | Fixé à l'avance | Décidé par le LLM |
+| Contrôle | Total | Partiel |
+| Prévisibilité | Haute | Variable |
+| Flexibilité | Limitée | Haute |
+| Outil recommandé | LangGraph (edges fixes) | LangGraph (conditional edges) |
+
+---
+
+## 🎯 Questions Challenge
+
+> **Question 1** : Cite deux situations concrètes en contexte retail où un `AgentExecutor` serait insuffisant et où LangGraph serait nécessaire.
+> **Question 2** : Quelle est la différence fondamentale entre un graphe LangGraph et un pipeline LangChain LCEL ?
+> **Question 3** : Pourquoi la notion d'état partagé est-elle centrale dans LangGraph ?
+
+---
+
 ### Chapitre 14 — Les fondamentaux de LangGraph
-- 14.1 State
-- 14.2 Nodes
-- 14.3 Edges
-- 14.4 Conditional edges
-- 14.5 Start
-- 14.6 End
-- 14.7 Compilation du graphe
-- 14.8 Invocation
-- 14.9 Streaming
-- 14.10 Visualisation du graphe
+
+Ce chapitre présente les primitives de LangGraph à travers des exemples orientés retail et spatial intelligence.
+
+#### 14.1 State
+
+Le **state** est la structure de données partagée entre tous les nœuds du graphe. Il est défini avec `TypedDict` ou `dataclass`.
+
+```python
+from typing import Annotated, List
+from typing_extensions import TypedDict
+from langgraph.graph.message import add_messages
+from langchain_core.messages import BaseMessage
+
+
+class SurveillanceState(TypedDict):
+    # Historique des messages (réduit par add_messages)
+    messages: Annotated[List[BaseMessage], add_messages]
+    # Données de la zone surveillée
+    zone_id: str
+    occupancy: int
+    noise_db: float
+    # Résultat de l'analyse
+    alert_required: bool
+    alert_reason: str
+    # Validation humaine
+    human_approved: bool
+```
+
+Chaque nœud reçoit l'état complet et retourne un dictionnaire de mises à jour.
+
+#### 14.2 Nodes
+
+Un nœud est une fonction Python prenant l'état en entrée et retournant un dictionnaire de mises à jour :
+
+```python
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage
+
+
+model = ChatOpenAI(model="gpt-4o", temperature=0)
+
+
+def analyze_zone(state: SurveillanceState) -> dict:
+    """Analyse l'état d'une zone et détermine si une alerte est nécessaire."""
+    zone_id = state["zone_id"]
+    occupancy = state["occupancy"]
+    noise_db = state["noise_db"]
+
+    prompt = f"""
+    Zone : {zone_id}
+    Personnes : {occupancy}
+    Bruit : {noise_db} dB
+    Seuil bruit : 75 dB
+
+    L'alerte est-elle nécessaire ? Réponds par 'oui' ou 'non' et explique brièvement.
+    """
+
+    response = model.invoke([HumanMessage(content=prompt)])
+
+    alert_required = "oui" in response.content.lower()
+
+    return {
+        "messages": [response],
+        "alert_required": alert_required,
+        "alert_reason": response.content,
+    }
+```
+
+#### 14.3 Edges
+
+Les arêtes définissent les transitions entre nœuds :
+
+```python
+from langgraph.graph import StateGraph, START, END
+
+
+builder = StateGraph(SurveillanceState)
+
+# Ajout des nœuds
+builder.add_node("analyze_zone", analyze_zone)
+builder.add_node("create_alert", create_alert_node)
+builder.add_node("log_event", log_event_node)
+
+# Arêtes fixes
+builder.add_edge(START, "analyze_zone")
+builder.add_edge("log_event", END)
+```
+
+#### 14.4 Conditional edges
+
+Les arêtes conditionnelles permettent un routage dynamique basé sur l'état :
+
+```python
+def route_after_analysis(state: SurveillanceState) -> str:
+    """Détermine le nœud suivant selon le résultat de l'analyse."""
+    if state["alert_required"]:
+        return "create_alert"
+    return "log_event"
+
+
+builder.add_conditional_edges(
+    "analyze_zone",
+    route_after_analysis,
+    {
+        "create_alert": "create_alert",
+        "log_event": "log_event",
+    },
+)
+```
+
+#### 14.5 Start
+
+Le nœud `START` est le point d'entrée du graphe. Il est fourni par LangGraph et désigne le premier nœud à exécuter.
+
+```python
+builder.add_edge(START, "analyze_zone")
+```
+
+#### 14.6 End
+
+Le nœud `END` signale la fin de l'exécution. Un graphe peut avoir plusieurs chemins vers `END`.
+
+```python
+builder.add_edge("log_event", END)
+builder.add_edge("create_alert", END)
+```
+
+#### 14.7 Compilation du graphe
+
+```python
+graph = builder.compile()
+```
+
+La compilation valide la structure du graphe et retourne un objet exécutable.
+
+#### 14.8 Invocation
+
+```python
+initial_state = {
+    "messages": [],
+    "zone_id": "caisse",
+    "occupancy": 142,
+    "noise_db": 82.5,
+    "alert_required": False,
+    "alert_reason": "",
+    "human_approved": False,
+}
+
+result = graph.invoke(initial_state)
+print(result["alert_required"])
+print(result["alert_reason"])
+```
+
+#### 14.9 Streaming
+
+LangGraph supporte le streaming des événements de chaque nœud :
+
+```python
+for event in graph.stream(initial_state, stream_mode="updates"):
+    for node_name, node_output in event.items():
+        print(f"[{node_name}] → {node_output}")
+```
+
+#### 14.10 Visualisation du graphe
+
+```python
+from IPython.display import Image, display
+
+
+# En Jupyter
+display(Image(graph.get_graph().draw_mermaid_png()))
+
+# Obtenir la représentation Mermaid
+print(graph.get_graph().draw_mermaid())
+```
+
+Exemple de graphe généré :
+
+```mermaid
+graph TD
+    N130["START"]
+    N131["analyze_zone"]
+    N132["create_alert"]
+    N133["log_event"]
+    N134["END"]
+
+    N130 --> N131
+    N131 -->|"alert_required=True"| N132
+    N131 -->|"alert_required=False"| N133
+    N132 --> N134
+    N133 --> N134
+```
+
+---
+
+## 🎯 Questions Challenge
+
+> **Question 1** : Quelle est la différence entre une arête fixe et une arête conditionnelle dans LangGraph ?
+> **Question 2** : Pourquoi définir l'état avec `TypedDict` plutôt qu'un simple dictionnaire Python ?
+> **Question 3** : Dans quel cas utiliserais-tu `stream_mode="updates"` plutôt que `invoke` pour un système de surveillance temps réel ?
+
+---
+
 ## Partie IX — Construire des Agents avec LangGraph
 
 ### Chapitre 15 — Agent LangGraph
-- 15.1 Architecture
-- LLM
-- 15.2 Routing
-- 15.3 Conditional edges
-- 15.4 Tool execution
-- 15.5 Boucles
-- 15.6 Arrêt contrôlé
-- 15.7 Error recovery
-- 15.8 Retry nodes
-- 15.9 Fallback nodes
-- 15.10 Human approval nodes
+
+LangGraph permet de construire des agents avec un contrôle total du flux d'exécution. Ce chapitre construit pas à pas un agent complet, du routing à la gestion des erreurs.
+
+#### 15.1 Architecture
+
+L'architecture d'un agent LangGraph typique combine un nœud LLM, un nœud d'exécution de tools, et des arêtes conditionnelles :
+
+```mermaid
+graph TD
+    N140["START"]
+    N141["agent (LLM)"]
+    N142["tools"]
+    N143{"Fin ?"}
+    N144["END"]
+
+    N140 --> N141
+    N141 --> N143
+    N143 -- "tool_calls" --> N142
+    N142 --> N141
+    N143 -- "fin" --> N144
+```
+
+#### LLM
+
+```python
+from langchain_openai import ChatOpenAI
+from langchain_core.tools import tool
+
+
+@tool
+def get_zone_data(zone_id: str) -> dict:
+    """Retourne les données temps réel d'une zone du site."""
+    zones = {
+        "zone_a": {"count": 87, "noise_db": 74.0, "threshold_noise": 70},
+        "caisse": {"count": 142, "noise_db": 81.0, "threshold_noise": 75},
+        "entree": {"count": 35, "noise_db": 62.0, "threshold_noise": 80},
+    }
+    return zones.get(zone_id.lower(), {"error": f"Zone inconnue : {zone_id}"})
+
+
+@tool
+def create_alert(zone_id: str, reason: str, severity: str) -> str:
+    """Crée une alerte dans le système de gestion du site."""
+    return f"Alerte {severity} créée pour {zone_id} : {reason}"
+
+
+@tool
+def get_site_summary() -> dict:
+    """Retourne un résumé de l'état global du site."""
+    return {
+        "total_zones": 5,
+        "zones_in_alert": 2,
+        "highest_noise_zone": "caisse",
+        "highest_noise_db": 81.0,
+    }
+
+
+tools = [get_zone_data, create_alert, get_site_summary]
+
+model = ChatOpenAI(model="gpt-4o", temperature=0)
+model_with_tools = model.bind_tools(tools)
+```
+
+#### 15.2 Routing
+
+```python
+from typing import Literal
+from langchain_core.messages import AIMessage
+
+
+def should_continue(state: dict) -> Literal["tools", "__end__"]:
+    """Détermine si l'agent doit appeler des tools ou terminer."""
+    messages = state["messages"]
+    last_message = messages[-1]
+
+    if isinstance(last_message, AIMessage) and last_message.tool_calls:
+        return "tools"
+    return "__end__"
+```
+
+#### 15.3 Conditional edges
+
+```python
+from langgraph.graph import StateGraph, START, END
+from langgraph.prebuilt import ToolNode
+from typing import Annotated, List
+from typing_extensions import TypedDict
+from langgraph.graph.message import add_messages
+from langchain_core.messages import BaseMessage
+
+
+class AgentState(TypedDict):
+    messages: Annotated[List[BaseMessage], add_messages]
+
+
+def call_model(state: AgentState) -> dict:
+    """Nœud LLM : appelle le modèle avec l'état courant."""
+    messages = state["messages"]
+    response = model_with_tools.invoke(messages)
+    return {"messages": [response]}
+
+
+tool_node = ToolNode(tools)
+
+builder = StateGraph(AgentState)
+builder.add_node("agent", call_model)
+builder.add_node("tools", tool_node)
+
+builder.add_edge(START, "agent")
+builder.add_conditional_edges("agent", should_continue)
+builder.add_edge("tools", "agent")
+
+graph = builder.compile()
+```
+
+#### 15.4 Tool execution
+
+`ToolNode` est un nœud prêt à l'emploi qui exécute tous les tool calls présents dans le dernier message :
+
+```python
+from langgraph.prebuilt import ToolNode
+
+
+tool_node = ToolNode(tools)
+```
+
+Pour un comportement plus personnalisé :
+
+```python
+from langchain_core.messages import ToolMessage
+import json
+
+
+def custom_tool_node(state: AgentState) -> dict:
+    """Nœud d'exécution de tools avec logging."""
+    messages = state["messages"]
+    last_message = messages[-1]
+
+    tool_results = []
+    for tool_call in last_message.tool_calls:
+        tool_name = tool_call["name"]
+        tool_args = tool_call["args"]
+
+        # Trouver et appeler le bon tool
+        matching_tools = [t for t in tools if t.name == tool_name]
+        if not matching_tools:
+            result = {"error": f"Tool inconnu : {tool_name}"}
+        else:
+            try:
+                result = matching_tools[0].invoke(tool_args)
+            except Exception as e:
+                result = {"error": str(e)}
+
+        tool_results.append(
+            ToolMessage(
+                content=json.dumps(result, ensure_ascii=False),
+                tool_call_id=tool_call["id"],
+            )
+        )
+
+    return {"messages": tool_results}
+```
+
+#### 15.5 Boucles
+
+La boucle agent ↔ tools s'arrête naturellement quand l'agent produit une réponse sans tool_calls. Pour des cas plus complexes, ajouter un compteur dans l'état :
+
+```python
+class AgentStateWithCounter(TypedDict):
+    messages: Annotated[List[BaseMessage], add_messages]
+    iteration_count: int
+
+
+def call_model_with_counter(state: AgentStateWithCounter) -> dict:
+    """Nœud LLM avec compteur d'itérations."""
+    current_count = state.get("iteration_count", 0)
+    return {
+        "messages": [model_with_tools.invoke(state["messages"])],
+        "iteration_count": current_count + 1,
+    }
+
+
+def should_continue_with_limit(state: AgentStateWithCounter) -> str:
+    """Arrête après 10 itérations même si non terminé."""
+    if state.get("iteration_count", 0) >= 10:
+        return "__end__"
+    last_message = state["messages"][-1]
+    if isinstance(last_message, AIMessage) and last_message.tool_calls:
+        return "tools"
+    return "__end__"
+```
+
+#### 15.6 Arrêt contrôlé
+
+```python
+from langchain_core.messages import SystemMessage
+
+
+SYSTEM_MESSAGE = SystemMessage(content="""
+Tu es un agent de surveillance retail.
+Quand tu as répondu à la question, termine IMMÉDIATEMENT.
+N'appelle pas de tools supplémentaires si la réponse est complète.
+""")
+
+result = graph.invoke({
+    "messages": [
+        SYSTEM_MESSAGE,
+        HumanMessage(content="Vérifie la zone caisse et crée une alerte si nécessaire."),
+    ]
+})
+```
+
+#### 15.7 Error recovery
+
+```python
+def call_model_with_error_recovery(state: AgentState) -> dict:
+    """Nœud LLM avec récupération d'erreur."""
+    try:
+        response = model_with_tools.invoke(state["messages"])
+        return {"messages": [response]}
+    except Exception as e:
+        # Retour d'un message d'erreur lisible par le graphe
+        error_message = AIMessage(
+            content=f"Erreur lors de l'appel au modèle : {str(e)}. Arrêt."
+        )
+        return {"messages": [error_message]}
+```
+
+#### 15.8 Retry nodes
+
+```python
+import time
+from typing import Callable
+
+
+def with_retry(func: Callable, max_retries: int = 3, delay: float = 1.0):
+    """Décorateur de retry pour les nœuds LangGraph."""
+    def wrapper(state):
+        for attempt in range(max_retries):
+            try:
+                return func(state)
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(delay * (attempt + 1))
+                else:
+                    raise
+    return wrapper
+
+
+resilient_call_model = with_retry(call_model, max_retries=3)
+builder.add_node("agent", resilient_call_model)
+```
+
+#### 15.9 Fallback nodes
+
+```python
+from langchain_anthropic import ChatAnthropic
+
+
+fallback_model = ChatAnthropic(
+    model="claude-3-5-sonnet-latest",
+    temperature=0,
+)
+fallback_model_with_tools = fallback_model.bind_tools(tools)
+
+
+def call_model_with_fallback(state: AgentState) -> dict:
+    """Nœud LLM avec fallback sur Anthropic si OpenAI échoue."""
+    try:
+        response = model_with_tools.invoke(state["messages"])
+        return {"messages": [response]}
+    except Exception:
+        response = fallback_model_with_tools.invoke(state["messages"])
+        return {"messages": [response]}
+```
+
+#### 15.10 Human approval nodes
+
+```python
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import interrupt
+
+
+def create_alert_with_approval(state: AgentState) -> dict:
+    """Nœud qui crée une alerte après approbation humaine."""
+    # Extraire les détails de l'alerte depuis les messages
+    last_tool_call = state["messages"][-2].tool_calls[-1]
+    alert_args = last_tool_call["args"]
+
+    # Interrompre pour demander l'approbation humaine
+    decision = interrupt({
+        "type": "human_approval",
+        "message": (
+            f"Créer une alerte {alert_args.get('severity', 'medium')} "
+            f"pour {alert_args.get('zone_id')} ? "
+            f"Raison : {alert_args.get('reason')}"
+        ),
+        "alert_details": alert_args,
+    })
+
+    if decision.get("approved"):
+        result = create_alert.invoke(alert_args)
+        return {"messages": [AIMessage(content=f"Alerte créée : {result}")]}
+    else:
+        return {"messages": [AIMessage(content="Alerte annulée par l'opérateur.")]}
+
+
+# Compilation avec checkpointer pour supporter les interruptions
+checkpointer = MemorySaver()
+graph_with_hitl = builder.compile(checkpointer=checkpointer)
+```
+
+---
+
+## 🎯 Questions Challenge
+
+> **Question 1** : Explique le rôle du `ToolNode` et dans quel cas tu écrirais un nœud d'exécution de tools personnalisé.
+> **Question 2** : Comment garantir qu'un agent LangGraph ne s'exécute pas plus de N fois même si le LLM continue à appeler des tools ?
+> **Question 3** : Décris l'architecture d'un agent retail capable de créer des alertes avec validation humaine pour les alertes critiques uniquement.
+
+---
+
 ## Partie X — State, Mémoire et Persistence
 
 ### Chapitre 16 — Concevoir le State
-- 16.1 Pourquoi le state est central
-- 16.2 State schema
-- 16.3 State updates
-- 16.4 Reducers
-- 16.5 État conversationnel
-- 16.6 État métier
-- 16.7 État temporaire
-- 16.8 État persistant
+
+Le **state** est la colonne vertébrale d'un système LangGraph. Bien le concevoir dès le départ évite des refactorisations coûteuses.
+
+#### 16.1 Pourquoi le state est central
+
+Le state remplit plusieurs rôles simultanément :
+
+```mermaid
+graph TD
+    N150["State LangGraph"]
+    N151["Mémoire de travail du graphe"]
+    N152["Communication entre nœuds"]
+    N153["Source de vérité pour le routing"]
+    N154["Base de la persistence"]
+    N155["Interface avec l'humain"]
+
+    N150 --> N151
+    N150 --> N152
+    N150 --> N153
+    N150 --> N154
+    N150 --> N155
+```
+
+Un state mal conçu rend le graphe difficile à déboguer, à tester et à faire évoluer.
+
+#### 16.2 State schema
+
+```python
+from typing import Annotated, List, Optional
+from typing_extensions import TypedDict
+from langgraph.graph.message import add_messages
+from langchain_core.messages import BaseMessage
+
+
+class RetailAgentState(TypedDict):
+    # --- Conversation ---
+    messages: Annotated[List[BaseMessage], add_messages]
+
+    # --- Données métier ---
+    site_id: str
+    zone_id: Optional[str]
+    current_occupancy: Optional[int]
+    current_noise_db: Optional[float]
+
+    # --- Résultats d'analyse ---
+    alert_required: bool
+    alert_severity: Optional[str]
+    alert_reason: Optional[str]
+
+    # --- Contrôle de flux ---
+    iteration_count: int
+    error_count: int
+    last_error: Optional[str]
+
+    # --- Persistence ---
+    session_id: str
+    created_at: str
+```
+
+#### 16.3 State updates
+
+Chaque nœud met à jour **uniquement les champs qu'il modifie** :
+
+```python
+def analyze_occupancy(state: RetailAgentState) -> dict:
+    """Analyse l'occupation et met à jour l'état."""
+    occupancy = state["current_occupancy"]
+    # ... analyse
+    return {
+        # Met à jour seulement ces deux champs
+        "alert_required": occupancy > 150,
+        "alert_reason": f"Occupation élevée : {occupancy} personnes",
+    }
+```
+
+Les champs non retournés restent inchangés.
+
+#### 16.4 Reducers
+
+Par défaut, une mise à jour remplace la valeur existante. Un **reducer** permet de définir un comportement d'accumulation.
+
+Le reducer `add_messages` est l'exemple le plus courant : il ajoute les nouveaux messages à la liste existante au lieu de la remplacer.
+
+```python
+from operator import add
+from typing import Annotated
+
+
+class StateWithAccumulator(TypedDict):
+    # Accumulateur : les nouvelles valeurs s'ajoutent à la liste
+    alerts: Annotated[List[str], add]
+    # Remplacement : la nouvelle valeur écrase l'ancienne
+    last_zone_id: str
+```
+
+Reducer personnalisé :
+
+```python
+from typing import List
+
+
+def deduplicate_alerts(existing: List[str], new: List[str]) -> List[str]:
+    """Reducer qui déduplique les alertes."""
+    return list(set(existing + new))
+
+
+class StateWithDedup(TypedDict):
+    alerts: Annotated[List[str], deduplicate_alerts]
+```
+
+#### 16.5 État conversationnel
+
+L'état conversationnel maintient l'historique des échanges :
+
+```python
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+
+# L'état conversationnel est géré via add_messages
+# Chaque nœud ajoute ses messages sans écraser l'historique
+```
+
+Pour limiter la taille de l'historique :
+
+```python
+from langchain_core.messages import trim_messages
+
+
+def trim_conversation(state: RetailAgentState) -> dict:
+    """Tronque l'historique pour rester dans la fenêtre de contexte."""
+    trimmed = trim_messages(
+        state["messages"],
+        max_tokens=4000,
+        token_counter=model,
+        strategy="last",
+        include_system=True,
+    )
+    return {"messages": trimmed}
+```
+
+#### 16.6 État métier
+
+L'état métier contient les données de domaine spécifiques à l'application :
+
+```python
+from pydantic import BaseModel
+from typing import Optional
+
+
+class ZoneSnapshot(BaseModel):
+    zone_id: str
+    occupancy: int
+    noise_db: float
+    smoke_detected: bool
+    timestamp: str
+
+
+class RetailBusinessState(TypedDict):
+    current_snapshot: Optional[ZoneSnapshot]
+    historical_snapshots: List[ZoneSnapshot]
+    active_alerts: List[str]
+    site_config: dict
+```
+
+#### 16.7 État temporaire
+
+Certains champs ne sont nécessaires que pendant l'exécution d'un sous-workflow :
+
+```python
+class StateWithTemp(TypedDict):
+    # Permanent
+    messages: Annotated[List[BaseMessage], add_messages]
+    site_id: str
+    # Temporaire — à nettoyer après usage
+    temp_api_response: Optional[dict]
+    temp_raw_data: Optional[str]
+
+
+def cleanup_temp_state(state: StateWithTemp) -> dict:
+    """Nettoie les champs temporaires après usage."""
+    return {
+        "temp_api_response": None,
+        "temp_raw_data": None,
+    }
+```
+
+#### 16.8 État persistant
+
+Certaines informations doivent survivre entre les sessions. LangGraph gère cela via les checkpoints (voir chapitre 17).
+
+```python
+class PersistentRetailState(TypedDict):
+    # Persistant entre sessions
+    session_id: str
+    site_id: str
+    alert_history: Annotated[List[dict], add]
+    # Non persistant (recalculé à chaque session)
+    messages: Annotated[List[BaseMessage], add_messages]
+    current_occupancy: Optional[int]
+```
+
+---
+
+## 🎯 Questions Challenge
+
+> **Question 1** : Quelle est la différence entre un champ d'état avec reducer `add` et un champ avec remplacement direct ?
+> **Question 2** : Comment séparerais-tu l'état conversationnel et l'état métier dans un agent de surveillance retail multi-sites ?
+> **Question 3** : Dans quel cas créer un reducer personnalisé plutôt qu'utiliser `add` ou `add_messages` ?
+
+---
+
 ### Chapitre 17 — Persistence et Checkpoints
-- 17.1 Pourquoi persister l'état
-- 17.2 Checkpoints
-- 17.3 Sessions
-- 17.4 Thread identity
-- 17.5 Reprendre une tâche interrompue
-- 17.6 Recovery après crash
-- 17.7 Historique des états
-- 17.8 Time travel
-- 17.9 Architecture de persistence
+
+La persistence permet à un agent de retrouver son état après une interruption, une panne ou un redémarrage. C'est une fonctionnalité essentielle pour les systèmes de production.
+
+#### 17.1 Pourquoi persister l'état
+
+```mermaid
+graph TD
+    N160["Exécution en cours"]
+    N161{"Interruption ?"}
+    N162["Sans persistence"]
+    N163["Avec persistence"]
+    N164["État perdu — recommencer"]
+    N165["État sauvegardé — reprendre"]
+
+    N160 --> N161
+    N161 -- Oui --> N162
+    N161 -- Oui --> N163
+    N162 --> N164
+    N163 --> N165
+```
+
+Cas concrets :
+- timeout d'une validation humaine (l'opérateur répond 2 heures plus tard) ;
+- redémarrage du service en production ;
+- pause pour traitement asynchrone (rapport nocturne).
+
+#### 17.2 Checkpoints
+
+Un checkpoint est un instantané de l'état à un point donné de l'exécution.
+
+```python
+from langgraph.checkpoint.memory import MemorySaver
+
+
+# Checkpointer en mémoire (développement)
+checkpointer = MemorySaver()
+
+graph = builder.compile(checkpointer=checkpointer)
+```
+
+Pour la production, utiliser un checkpointer persistant :
+
+```python
+# PostgreSQL (production recommandée)
+from langgraph.checkpoint.postgres import PostgresSaver
+import psycopg
+
+
+conn = psycopg.connect("******localhost/retail_db")
+checkpointer = PostgresSaver(conn)
+checkpointer.setup()  # Crée les tables si nécessaire
+
+graph = builder.compile(checkpointer=checkpointer)
+```
+
+#### 17.3 Sessions
+
+Chaque exécution est identifiée par un `thread_id`. Le même `thread_id` permet de reprendre la même session.
+
+```python
+config = {
+    "configurable": {
+        "thread_id": "surveillance_session_001",
+    }
+}
+
+# Première invocation
+result = graph.invoke(initial_state, config=config)
+
+# Invocation suivante avec le même thread — reprend l'état sauvegardé
+result2 = graph.invoke(
+    {"messages": [HumanMessage(content="Mise à jour : 10 personnes supplémentaires en zone caisse")]},
+    config=config,
+)
+```
+
+#### 17.4 Thread identity
+
+```python
+import uuid
+
+
+def create_session_id(site_id: str, operator_id: str) -> str:
+    """Génère un identifiant de session déterministe."""
+    return f"{site_id}_{operator_id}_{uuid.uuid4().hex[:8]}"
+
+
+session_id = create_session_id("lyon_part_dieu", "op_42")
+config = {"configurable": {"thread_id": session_id}}
+```
+
+#### 17.5 Reprendre une tâche interrompue
+
+```python
+# L'agent a été interrompu (Human-in-the-loop ou interruption technique)
+# Reprendre en fournissant la suite
+
+resume_config = {
+    "configurable": {
+        "thread_id": "surveillance_session_001",
+    }
+}
+
+# Fournir la réponse humaine pour reprendre
+result = graph.invoke(
+    {"messages": [HumanMessage(content="Alerte approuvée, procéder.")]},
+    config=resume_config,
+)
+```
+
+#### 17.6 Recovery après crash
+
+```python
+from langgraph.checkpoint.postgres import PostgresSaver
+
+
+def get_or_create_session(
+    graph,
+    thread_id: str,
+    initial_state: dict,
+    config: dict,
+) -> dict:
+    """
+    Reprend une session existante ou en démarre une nouvelle.
+    """
+    state_snapshot = graph.get_state(config)
+
+    if state_snapshot and state_snapshot.values:
+        # Session existante — reprendre
+        print(f"Session {thread_id} reprise depuis checkpoint")
+        return graph.invoke(None, config=config)
+    else:
+        # Nouvelle session
+        print(f"Nouvelle session {thread_id}")
+        return graph.invoke(initial_state, config=config)
+```
+
+#### 17.7 Historique des états
+
+```python
+# Lister tous les checkpoints d'une session
+checkpoints = list(graph.get_state_history(config))
+
+for checkpoint in checkpoints:
+    print(f"Step {checkpoint.metadata.get('step')} | "
+          f"Nœud : {checkpoint.metadata.get('source')} | "
+          f"Alertes actives : {checkpoint.values.get('active_alerts', [])}")
+```
+
+#### 17.8 Time travel
+
+LangGraph permet de revenir à un état antérieur et de reprendre l'exécution depuis ce point :
+
+```python
+# Obtenir l'historique
+history = list(graph.get_state_history(config))
+
+# Reprendre depuis un checkpoint spécifique (time travel)
+past_config = history[2].config  # 3e checkpoint dans le passé
+result = graph.invoke(
+    {"messages": [HumanMessage(content="Reprendre avec données corrigées")]},
+    config=past_config,
+)
+```
+
+#### 17.9 Architecture de persistence
+
+```mermaid
+graph TD
+    N170["Agent LangGraph"]
+    N171["MemorySaver"]
+    N172["PostgresSaver"]
+    N173["RedisSaver"]
+
+    N174["Développement / Tests"]
+    N175["Production — haute durabilité"]
+    N176["Production — haute performance"]
+
+    N170 --> N171
+    N170 --> N172
+    N170 --> N173
+
+    N171 --> N174
+    N172 --> N175
+    N173 --> N176
+```
+
+Recommandation :
+- **développement** : `MemorySaver` (rapide, sans dépendance) ;
+- **staging/production** : `PostgresSaver` si vous avez déjà PostgreSQL ;
+- **haute charge** : `RedisSaver` pour la performance.
+
+---
+
+## 🎯 Questions Challenge
+
+> **Question 1** : Décris un scénario de production retail où la persistence LangGraph est indispensable.
+> **Question 2** : Quelle est la différence entre un `thread_id` et un `checkpoint_id` dans LangGraph ?
+> **Question 3** : Dans quel cas utiliserais-tu le time travel en production plutôt qu'en développement seulement ?
+
+---
+
 ## Partie XI — Human-in-the-Loop
 
 ### Chapitre 18 — Ajouter un humain dans la boucle
-- 18.1 Pourquoi le Human-in-the-loop
-- 18.2 Interruptions
-- 18.3 Validation humaine
-- 18.4 Modification d'une décision
-- 18.5 Reprise du graphe
-- 18.6 Approbation d'une action sensible
-- 18.7 Exemple : validation avant envoi d'un email
-- 18.8 Exemple : validation avant modification d'une base de données
-- 18.9 Human-in-the-loop pour les systèmes critiques
+
+Un agent autonome prend des décisions. Mais certaines décisions — fermer un accès, envoyer une communication d'urgence, modifier une configuration critique — ne doivent pas être prises sans validation humaine. LangGraph intègre ce pattern nativement.
+
+#### 18.1 Pourquoi le Human-in-the-loop
+
+Les raisons d'introduire un humain dans la boucle :
+
+```mermaid
+graph TD
+    N180["Actions critiques"]
+    N181["Sécurité physique des personnes"]
+    N182["Coûts élevés"]
+    N183["Décisions irréversibles"]
+    N184["Exigences légales et conformité"]
+    N185["Fiabilité du LLM insuffisante pour le cas"]
+
+    N180 --> N181
+    N180 --> N182
+    N180 --> N183
+    N180 --> N184
+    N180 --> N185
+```
+
+#### 18.2 Interruptions
+
+LangGraph permet d'interrompre l'exécution à n'importe quel nœud et d'attendre une entrée humaine avant de reprendre.
+
+```python
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph import interrupt
+
+
+def approval_node(state: RetailAgentState) -> dict:
+    """Nœud d'approbation humaine."""
+    # L'exécution s'arrête ici et attend une réponse
+    human_input = interrupt({
+        "type": "approval_request",
+        "message": "Veuillez valider cette action avant de continuer.",
+        "context": {
+            "zone_id": state.get("zone_id"),
+            "alert_severity": state.get("alert_severity"),
+            "alert_reason": state.get("alert_reason"),
+        },
+    })
+    return {"human_approved": human_input.get("approved", False)}
+
+
+checkpointer = MemorySaver()
+graph = builder.compile(
+    checkpointer=checkpointer,
+    interrupt_before=["approval_node"],
+)
+```
+
+#### 18.3 Validation humaine
+
+```python
+# Démarrer l'exécution
+config = {"configurable": {"thread_id": "session_abc"}}
+
+result = graph.invoke(initial_state, config=config)
+# → L'agent s'arrête avant approval_node
+
+# L'opérateur examine l'état
+state = graph.get_state(config)
+print(state.values["alert_reason"])  # Affiche la raison de l'alerte
+
+# L'opérateur valide
+graph.update_state(
+    config,
+    values={"human_approved": True},
+    as_node="approval_node",
+)
+
+# Reprendre l'exécution
+result = graph.invoke(None, config=config)
+```
+
+#### 18.4 Modification d'une décision
+
+L'opérateur peut modifier l'état avant de reprendre :
+
+```python
+# Modifier la sévérité de l'alerte avant approbation
+graph.update_state(
+    config,
+    values={
+        "alert_severity": "medium",  # Downgradé de high à medium
+        "human_approved": True,
+    },
+    as_node="approval_node",
+)
+```
+
+#### 18.5 Reprise du graphe
+
+```python
+# Reprendre depuis le point d'interruption
+for event in graph.stream(None, config=config):
+    for node_name, output in event.items():
+        print(f"[{node_name}] {output}")
+```
+
+#### 18.6 Approbation d'une action sensible
+
+Architecture complète avec approbation conditionnelle :
+
+```python
+from typing import Literal
+
+
+class AlertState(TypedDict):
+    messages: Annotated[List[BaseMessage], add_messages]
+    zone_id: str
+    alert_severity: str
+    alert_reason: str
+    human_approved: bool
+    action_taken: str
+
+
+def route_by_severity(state: AlertState) -> Literal["approval_node", "auto_alert"]:
+    """Les alertes critiques nécessitent approbation, les autres sont automatiques."""
+    severity = state.get("alert_severity", "low")
+    if severity in {"critical", "high"}:
+        return "approval_node"
+    return "auto_alert"
+
+
+def auto_alert(state: AlertState) -> dict:
+    """Crée l'alerte automatiquement (severité basse ou moyenne)."""
+    # ... créer l'alerte
+    return {"action_taken": f"Alerte {state['alert_severity']} créée automatiquement"}
+
+
+def approval_node(state: AlertState) -> dict:
+    """Attend l'approbation pour les alertes haute/critique."""
+    decision = interrupt({
+        "question": (
+            f"Confirmer l'alerte {state['alert_severity']} pour {state['zone_id']} ?\n"
+            f"Raison : {state['alert_reason']}"
+        )
+    })
+    return {"human_approved": decision.get("approved", False)}
+
+
+def execute_after_approval(state: AlertState) -> dict:
+    """Exécute l'alerte après approbation humaine."""
+    if state["human_approved"]:
+        # ... créer l'alerte
+        return {"action_taken": f"Alerte {state['alert_severity']} créée après approbation"}
+    return {"action_taken": "Alerte annulée par l'opérateur"}
+```
+
+#### 18.7 Exemple : validation avant envoi d'un email
+
+```python
+def send_email_node(state: dict) -> dict:
+    """Envoie un email de notification après approbation."""
+    email_draft = state.get("email_draft", {})
+
+    # Interrompre et afficher le brouillon
+    approval = interrupt({
+        "type": "email_approval",
+        "draft": {
+            "to": email_draft.get("to"),
+            "subject": email_draft.get("subject"),
+            "body": email_draft.get("body"),
+        },
+        "message": "Valider l'envoi de cet email ?",
+    })
+
+    if approval.get("approved"):
+        # ... envoyer l'email réel
+        return {"email_sent": True, "action_taken": "Email envoyé"}
+    return {"email_sent": False, "action_taken": "Email annulé"}
+```
+
+#### 18.8 Exemple : validation avant modification d'une base de données
+
+```python
+def update_config_node(state: dict) -> dict:
+    """Met à jour la configuration d'une zone après approbation humaine."""
+    proposed_config = state.get("proposed_config", {})
+    current_config = state.get("current_config", {})
+
+    approval = interrupt({
+        "type": "config_change",
+        "message": f"Modifier la configuration de {state.get('zone_id')} ?",
+        "before": current_config,
+        "after": proposed_config,
+    })
+
+    if approval.get("approved"):
+        # ... appliquer le changement en base
+        return {
+            "current_config": proposed_config,
+            "action_taken": "Configuration mise à jour",
+        }
+    return {"action_taken": "Modification de configuration annulée"}
+```
+
+#### 18.9 Human-in-the-loop pour les systèmes critiques
+
+Pour les systèmes critiques (sécurité physique, accès, finances), renforcer avec :
+
+```mermaid
+graph TD
+    N190["Agent — détecte un incident"]
+    N191["Analyse automatique"]
+    N192["Classification de sévérité"]
+    N193{"Critique ?"}
+    N194["Validation opérateur niveau 1"]
+    N195["Validation superviseur niveau 2"]
+    N196["Action automatique"]
+    N197["Action exécutée"]
+    N198["Audit log"]
+
+    N190 --> N191
+    N191 --> N192
+    N192 --> N193
+    N193 -- Oui --> N194
+    N194 --> N195
+    N195 --> N197
+    N193 -- Non --> N196
+    N196 --> N197
+    N197 --> N198
+```
+
+---
+
+## 🎯 Questions Challenge
+
+> **Question 1** : Dans quels cas d'usage retail le Human-in-the-loop est-il juridiquement ou opérationnellement obligatoire ?
+> **Question 2** : Comment implémenter une validation à deux niveaux (opérateur + superviseur) dans LangGraph ?
+> **Question 3** : Quelle est la différence entre `interrupt_before` et `interrupt_after` lors de la compilation du graphe ?
+
+---
+
 ## Partie XII — Agents spécialisés et architectures complexes
 
 ### Chapitre 19 — Routing et orchestration
-- 19.1 Router
-- 19.2 Classification de requêtes
-- 19.3 Dynamic routing
-- 19.4 Parallel execution
-- 19.5 Fan-out / fan-in
-- 19.6 Subgraphs
-- 19.7 Workflows hybrides
+
+Dès qu'un système doit gérer plusieurs types de requêtes, plusieurs sources de données ou plusieurs domaines, le routing et l'orchestration deviennent essentiels.
+
+#### 19.1 Router
+
+Un **router** est un nœud qui analyse une entrée et dirige le flux vers le nœud le plus approprié.
+
+```mermaid
+graph TD
+    N200["Requête entrante"]
+    N201["Router (classification LLM)"]
+    N202["Agent surveillance caméras"]
+    N203["Agent analyse rapports"]
+    N204["Agent configuration"]
+    N205["Agent réponse générale"]
+
+    N200 --> N201
+    N201 -->|"surveillance"| N202
+    N201 -->|"rapport"| N203
+    N201 -->|"configuration"| N204
+    N201 -->|"général"| N205
+```
+
+#### 19.2 Classification de requêtes
+
+```python
+from pydantic import BaseModel, Field
+from typing import Literal
+from langchain_openai import ChatOpenAI
+
+
+class RouteDecision(BaseModel):
+    route: Literal["surveillance", "rapport", "configuration", "general"] = Field(
+        description="Route choisie selon la nature de la requête"
+    )
+    confidence: float = Field(description="Niveau de confiance 0-1")
+    reasoning: str = Field(description="Justification du choix")
+
+
+router_model = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+structured_router = router_model.with_structured_output(RouteDecision)
+
+
+def classify_request(state: dict) -> dict:
+    """Classifie la requête entrante et détermine la route."""
+    user_message = state["messages"][-1].content
+
+    prompt = f"""
+    Classifie cette requête retail/spatial intelligence :
+    "{user_message}"
+
+    Routes disponibles :
+    - surveillance : analyse de caméras, occupation, bruit, alertes temps réel
+    - rapport : historiques, analytics, dashboards, exports
+    - configuration : seuils, paramètres, zones, permissions
+    - general : questions générales, aide, documentation
+    """
+
+    decision = structured_router.invoke(prompt)
+    return {"route": decision.route, "routing_confidence": decision.confidence}
+
+
+def route_request(state: dict) -> str:
+    """Retourne le nom du nœud cible selon la route."""
+    route_map = {
+        "surveillance": "surveillance_agent",
+        "rapport": "report_agent",
+        "configuration": "config_agent",
+        "general": "general_agent",
+    }
+    return route_map.get(state.get("route", "general"), "general_agent")
+```
+
+#### 19.3 Dynamic routing
+
+Le routing dynamique permet de changer de route en cours d'exécution selon les découvertes de l'agent :
+
+```python
+def dynamic_router(state: dict) -> str:
+    """Routage dynamique selon le contexte accumulé."""
+    messages = state["messages"]
+    last_message = messages[-1]
+
+    # Si une alerte critique a été détectée, passer en mode urgence
+    if state.get("alert_severity") == "critical":
+        return "emergency_handler"
+
+    # Si l'agent a trouvé des données insuffisantes, demander plus d'infos
+    if state.get("data_insufficient"):
+        return "data_enrichment"
+
+    # Sinon continuer le flux normal
+    return "standard_response"
+```
+
+#### 19.4 Parallel execution
+
+LangGraph supporte l'exécution parallèle de plusieurs nœuds :
+
+```mermaid
+graph TD
+    N210["Requête d'analyse globale"]
+    N211["Fan-out"]
+    N212["Analyser zone_a"]
+    N213["Analyser zone_b"]
+    N214["Analyser caisse"]
+    N215["Fan-in — synthèse"]
+    N216["Rapport global"]
+
+    N210 --> N211
+    N211 --> N212
+    N211 --> N213
+    N211 --> N214
+    N212 --> N215
+    N213 --> N215
+    N214 --> N215
+    N215 --> N216
+```
+
+#### 19.5 Fan-out / fan-in
+
+```python
+from typing import List
+from langgraph.constants import Send
+
+
+class MultiZoneState(TypedDict):
+    site_id: str
+    zones_to_analyze: List[str]
+    zone_results: Annotated[List[dict], add]
+    global_summary: str
+
+
+def fan_out_zones(state: MultiZoneState) -> List[Send]:
+    """Dispatch l'analyse vers un nœud par zone."""
+    return [
+        Send("analyze_single_zone", {"zone_id": zone, "site_id": state["site_id"]})
+        for zone in state["zones_to_analyze"]
+    ]
+
+
+def analyze_single_zone(state: dict) -> dict:
+    """Analyse une zone individuelle."""
+    zone_id = state["zone_id"]
+    # ... analyse réelle
+    return {
+        "zone_results": [{"zone_id": zone_id, "status": "ok", "noise_db": 65.0}]
+    }
+
+
+def synthesize_results(state: MultiZoneState) -> dict:
+    """Synthétise les résultats de toutes les zones."""
+    results = state["zone_results"]
+    alerts = [r for r in results if r.get("noise_db", 0) > 75]
+    summary = (
+        f"{len(results)} zones analysées. "
+        f"{len(alerts)} zone(s) en alerte."
+    )
+    return {"global_summary": summary}
+
+
+builder_parallel = StateGraph(MultiZoneState)
+builder_parallel.add_node("fan_out", fan_out_zones)
+builder_parallel.add_node("analyze_single_zone", analyze_single_zone)
+builder_parallel.add_node("synthesize_results", synthesize_results)
+
+builder_parallel.add_edge(START, "fan_out")
+builder_parallel.add_conditional_edges("fan_out", lambda x: x)
+builder_parallel.add_edge("analyze_single_zone", "synthesize_results")
+builder_parallel.add_edge("synthesize_results", END)
+```
+
+#### 19.6 Subgraphs
+
+Un **subgraph** est un graphe LangGraph complet utilisé comme nœud dans un graphe parent :
+
+```python
+# Subgraph : analyse d'une zone
+zone_builder = StateGraph(ZoneAnalysisState)
+zone_builder.add_node("fetch_data", fetch_zone_data)
+zone_builder.add_node("analyze", analyze_zone_data)
+zone_builder.add_node("decide_alert", decide_alert)
+zone_builder.add_edge(START, "fetch_data")
+zone_builder.add_edge("fetch_data", "analyze")
+zone_builder.add_edge("analyze", "decide_alert")
+zone_builder.add_edge("decide_alert", END)
+
+zone_subgraph = zone_builder.compile()
+
+# Graphe parent : utilise le subgraph comme nœud
+site_builder = StateGraph(SiteAnalysisState)
+site_builder.add_node("analyze_zone_a", zone_subgraph)
+site_builder.add_node("analyze_zone_b", zone_subgraph)
+site_builder.add_node("synthesize", synthesize_all_zones)
+site_builder.add_edge(START, "analyze_zone_a")
+site_builder.add_edge("analyze_zone_a", "analyze_zone_b")
+site_builder.add_edge("analyze_zone_b", "synthesize")
+site_builder.add_edge("synthesize", END)
+```
+
+#### 19.7 Workflows hybrides
+
+Un **workflow hybride** combine des parties déterministes (flux fixe) et des parties agentiques (décision LLM) :
+
+```mermaid
+graph TD
+    N220["Déclencheur événement"]
+    N221["Extraction de données (déterministe)"]
+    N222["Classification LLM (agentique)"]
+    N223{"Routine ?"}
+    N224["Traitement automatique (déterministe)"]
+    N225["Agent complexe (agentique)"]
+    N226["Notification (déterministe)"]
+    N227["END"]
+
+    N220 --> N221
+    N221 --> N222
+    N222 --> N223
+    N223 -- Oui --> N224
+    N223 -- Non --> N225
+    N224 --> N226
+    N225 --> N226
+    N226 --> N227
+```
+
+---
+
+## 🎯 Questions Challenge
+
+> **Question 1** : Décris une architecture de routing pour un agent capable de répondre à la fois à des questions de surveillance temps réel et à des questions analytiques sur des historiques.
+> **Question 2** : Quels sont les risques d'un fan-out non contrôlé (trop de nœuds parallèles) en production ?
+> **Question 3** : Dans quel cas préférerais-tu un subgraph à un simple nœud dans un graphe LangGraph ?
+
+---
+
 ### Chapitre 20 — Multi-Agent Systems
-- 20.1 Pourquoi plusieurs agents ?
-- 20.2 Agent spécialisé
-- 20.3 Supervisor
-- 20.4 Agent researcher
-- 20.5 Agent analyst
-- 20.6 Agent writer
-- 20.7 Agent evaluator
-- 20.8 Communication entre agents
-- 20.9 Shared state
-- 20.10 Risques des architectures multi-agents
-- 20.11 Quand un seul agent est préférable
+
+Les architectures multi-agents permettent de spécialiser chaque agent sur une tâche précise et de les faire collaborer sous la coordination d'un superviseur.
+
+#### 20.1 Pourquoi plusieurs agents ?
+
+```mermaid
+graph TD
+    N230["Problème complexe"]
+    N231["Agent unique généraliste"]
+    N232["Système multi-agents spécialisés"]
+    N233["Prompt long, contexte surchargé"]
+    N234["Manque de focus"]
+    N235["Chaque agent — domaine précis"]
+    N236["Contexte optimisé par rôle"]
+    N237["Parallélisation possible"]
+
+    N230 --> N231
+    N230 --> N232
+    N231 --> N233
+    N231 --> N234
+    N232 --> N235
+    N232 --> N236
+    N232 --> N237
+```
+
+#### 20.2 Agent spécialisé
+
+Chaque agent spécialisé a :
+- un prompt système précis définissant son rôle ;
+- un ensemble de tools limité à son domaine ;
+- une connaissance métier spécifique via RAG ou contexte.
+
+```python
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import SystemMessage
+
+
+def create_surveillance_agent(tools: list, model_name: str = "gpt-4o") -> callable:
+    """Crée un agent spécialisé en surveillance caméra."""
+    model = ChatOpenAI(model=model_name, temperature=0)
+    model_with_tools = model.bind_tools(tools)
+
+    system_message = SystemMessage(content="""
+    Tu es un agent spécialisé en surveillance de site retail.
+    Tu analyses les données de caméras et capteurs en temps réel.
+    Tu identifies les situations anormales et proposes des alertes adaptées.
+    Tu ne fais rien d'autre — toute autre question doit être redirigée.
+    """)
+
+    def agent_node(state: dict) -> dict:
+        messages = [system_message] + state["messages"]
+        response = model_with_tools.invoke(messages)
+        return {"messages": [response]}
+
+    return agent_node
+```
+
+#### 20.3 Supervisor
+
+Le **superviseur** orchestre les agents spécialisés : il reçoit la requête, la distribue au bon agent, et synthétise les résultats.
+
+```python
+from pydantic import BaseModel, Field
+from typing import Literal
+
+
+AGENTS = ["surveillance_agent", "report_agent", "config_agent"]
+
+
+class SupervisorDecision(BaseModel):
+    next_agent: Literal["surveillance_agent", "report_agent", "config_agent", "FINISH"] = Field(
+        description="Prochain agent à appeler, ou FINISH si la tâche est terminée"
+    )
+    reasoning: str = Field(description="Justification du choix")
+
+
+supervisor_model = ChatOpenAI(model="gpt-4o", temperature=0)
+structured_supervisor = supervisor_model.with_structured_output(SupervisorDecision)
+
+
+def supervisor_node(state: dict) -> dict:
+    """Superviseur : décide quel agent appeler ou si la tâche est terminée."""
+    messages = state["messages"]
+
+    prompt = f"""
+    Tu es un superviseur d'agents retail.
+    Agents disponibles : {AGENTS}
+
+    Historique de la conversation :
+    {[m.content for m in messages[-5:]]}
+
+    Quel agent doit agir maintenant ?
+    Réponds FINISH si la tâche est complète.
+    """
+
+    decision = structured_supervisor.invoke(prompt)
+    return {"next_agent": decision.next_agent}
+
+
+def route_supervisor(state: dict) -> str:
+    """Retourne le nom du prochain nœud selon la décision du superviseur."""
+    next_agent = state.get("next_agent", "FINISH")
+    if next_agent == "FINISH":
+        return END
+    return next_agent
+```
+
+#### 20.4 Agent researcher
+
+```python
+def create_researcher_agent(retriever, tools: list) -> callable:
+    """Agent chargé de la recherche documentaire."""
+    model = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+    system_message = SystemMessage(content="""
+    Tu es un agent de recherche documentaire spécialisé en retail et spatial intelligence.
+    Tu recherches des informations factuelles dans la base de connaissances.
+    Tu cites toujours tes sources.
+    Tu ne génères pas d'informations que tu ne peux pas sourcer.
+    """)
+
+    # Ajouter le RAG comme tool
+    @tool
+    def search_knowledge(query: str) -> str:
+        """Recherche dans la base de connaissances documentaire."""
+        docs = retriever.invoke(query)
+        return format_context(docs)
+
+    agent_tools = tools + [search_knowledge]
+    model_with_tools = model.bind_tools(agent_tools)
+
+    def researcher_node(state: dict) -> dict:
+        messages = [system_message] + state["messages"]
+        response = model_with_tools.invoke(messages)
+        return {"messages": [response]}
+
+    return researcher_node
+```
+
+#### 20.5 Agent analyst
+
+```python
+def create_analyst_agent(tools: list) -> callable:
+    """Agent chargé de l'analyse des données et de la génération d'insights."""
+    model = ChatOpenAI(model="gpt-4o", temperature=0)
+
+    system_message = SystemMessage(content="""
+    Tu es un agent analyste en intelligence spatiale et retail.
+    Tu analyses des données chiffrées : occupation, flux, bruit, incidents.
+    Tu produis des insights actionnables et des recommandations précises.
+    Tu travailles à partir de données — pas de suppositions.
+    """)
+
+    model_with_tools = model.bind_tools(tools)
+
+    def analyst_node(state: dict) -> dict:
+        messages = [system_message] + state["messages"]
+        response = model_with_tools.invoke(messages)
+        return {"messages": [response]}
+
+    return analyst_node
+```
+
+#### 20.6 Agent writer
+
+```python
+def create_writer_agent() -> callable:
+    """Agent chargé de la rédaction de rapports et de communications."""
+    model = ChatOpenAI(model="gpt-4o", temperature=0.3)
+
+    system_message = SystemMessage(content="""
+    Tu es un agent rédacteur spécialisé en communication retail.
+    Tu transformes les analyses en rapports clairs, structurés et actionnables.
+    Tu adaptes le niveau de détail selon l'audience (opérateur, manager, direction).
+    Tu ne fais pas d'analyse — tu formules uniquement.
+    """)
+
+    def writer_node(state: dict) -> dict:
+        messages = [system_message] + state["messages"]
+        response = model.invoke(messages)
+        return {"messages": [response]}
+
+    return writer_node
+```
+
+#### 20.7 Agent evaluator
+
+```python
+from pydantic import BaseModel, Field
+
+
+class EvaluationResult(BaseModel):
+    quality_score: int = Field(description="Score de qualité 1-5")
+    is_sufficient: bool = Field(description="La réponse est-elle suffisante ?")
+    missing_elements: list = Field(description="Éléments manquants identifiés")
+    recommendation: str = Field(description="Prochaine étape recommandée")
+
+
+def create_evaluator_agent() -> callable:
+    """Agent évaluateur : vérifie la qualité des sorties."""
+    model = ChatOpenAI(model="gpt-4o", temperature=0)
+    structured_model = model.with_structured_output(EvaluationResult)
+
+    def evaluator_node(state: dict) -> dict:
+        last_response = state["messages"][-1].content
+        original_request = state["messages"][0].content
+
+        eval_prompt = f"""
+        Évalue cette réponse d'agent retail :
+
+        Requête originale : {original_request}
+        Réponse produite : {last_response}
+
+        La réponse est-elle complète, précise et actionnable ?
+        """
+
+        evaluation = structured_model.invoke(eval_prompt)
+        return {
+            "evaluation_score": evaluation.quality_score,
+            "response_sufficient": evaluation.is_sufficient,
+            "messages": [AIMessage(
+                content=f"Évaluation : score={evaluation.quality_score}/5 | "
+                        f"Suffisant={evaluation.is_sufficient}"
+            )],
+        }
+
+    return evaluator_node
+```
+
+#### 20.8 Communication entre agents
+
+Les agents d'un système multi-agents communiquent via l'état partagé du graphe :
+
+```mermaid
+graph TD
+    N240["Superviseur"]
+    N241["État partagé (messages + métadonnées)"]
+    N242["Agent surveillance"]
+    N243["Agent analyst"]
+    N244["Agent writer"]
+
+    N240 --> N241
+    N241 --> N242
+    N242 --> N241
+    N241 --> N243
+    N243 --> N241
+    N241 --> N244
+    N244 --> N241
+    N241 --> N240
+```
+
+#### 20.9 Shared state
+
+```python
+class MultiAgentState(TypedDict):
+    # Communication centrale
+    messages: Annotated[List[BaseMessage], add_messages]
+
+    # Routing
+    next_agent: str
+
+    # Données partagées entre agents
+    raw_data: Optional[dict]
+    analysis_results: Optional[dict]
+    final_report: Optional[str]
+
+    # Métadonnées
+    session_id: str
+    iteration_count: int
+    evaluation_score: Optional[int]
+    response_sufficient: bool
+```
+
+#### 20.10 Risques des architectures multi-agents
+
+```mermaid
+graph TD
+    N250["Risques multi-agents"]
+    N251["Boucles inter-agents"]
+    N252["Coût exponentiel"]
+    N253["Dégradation de la cohérence"]
+    N254["Complexité de débogage"]
+    N255["Latence accumulée"]
+
+    N250 --> N251
+    N250 --> N252
+    N250 --> N253
+    N250 --> N254
+    N250 --> N255
+```
+
+Mitigations :
+- définir `max_iterations` au niveau du graphe global ;
+- monitorer le coût total par requête ;
+- tracer chaque agent individuellement dans LangSmith ;
+- tester les chemins critiques avec des jeux de données représentatifs.
+
+#### 20.11 Quand un seul agent est préférable
+
+| Critère | Agent unique | Multi-agents |
+|---------|-------------|--------------|
+| Domaine unique | ✅ | ❌ surdimensionné |
+| Domaines multiples | ❌ contexte surchargé | ✅ |
+| Latence critique | ✅ | ❌ latence cumulée |
+| Budget limité | ✅ | ❌ coûts multipliés |
+| Workflows complexes parallèles | ❌ | ✅ |
+| Validation indépendante nécessaire | ❌ | ✅ |
+
+Règle : commencer par un agent unique. Passer au multi-agents uniquement si le contexte de l'agent unique dépasse régulièrement 50% de la fenêtre disponible ou si la qualité baisse sur des sous-domaines distincts.
+
+---
+
+## 🎯 Questions Challenge
+
+> **Question 1** : Décris une architecture multi-agents pour un système de gestion de site retail capable de surveiller des caméras, analyser des historiques et générer des rapports automatiques.
+> **Question 2** : Comment éviter les boucles infinies dans un système multi-agents supervisé ?
+> **Question 3** : Dans quel cas un agent évaluateur est-il justifié en production plutôt qu'en développement seulement ?
+
+
 ## Partie XIII — Agents multimodaux
 
 ### Chapitre 21 — Vision, audio et données structurées
