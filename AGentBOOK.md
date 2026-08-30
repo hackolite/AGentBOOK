@@ -11656,6 +11656,9 @@ Application du chapitre 23 :
 Application du chapitre 24 : endpoints `/chat` et `/chat/stream`, endpoint `/actions/{id}/approve` pour reprendre les interruptions HITL, authentification JWT, autorisation par site dans les tools, rate limiting par organisation.
 
 ```python
+from langgraph.types import Command
+
+
 @app.post("/actions/{thread_id}/approve")
 async def approve_action(thread_id: str, approved: bool, request: Request):
     """Reprend une exécution interrompue avec la décision humaine."""
