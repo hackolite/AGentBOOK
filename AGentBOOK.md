@@ -5823,9 +5823,9 @@ graph TD
     Input["Requête entrante"]
     Router["Router"]
     Input --> Router
-    Router -->|"Tâche simple (classification, extraction)"| Fast["gpt-4o-mini\n(rapide, économique)"]
-    Router -->|"Tâche complexe (raisonnement, planification)"| Power["gpt-4o\n(puissant)"]
-    Router -->|"Tâche critique (décision finale)"| Expert["claude-3-5-sonnet\n(secours / validation)"]
+    Router -->|"Tâche simple (classification, extraction)"| Fast["gpt-4o-mini<br/>(rapide, économique)"]
+    Router -->|"Tâche complexe (raisonnement, planification)"| Power["gpt-4o<br/>(puissant)"]
+    Router -->|"Tâche critique (décision finale)"| Expert["claude-3-5-sonnet<br/>(secours / validation)"]
     Fast --> Output["Résultat"]
     Power --> Output
     Expert --> Output
@@ -6418,8 +6418,8 @@ Un LLM produit par défaut du texte libre. Cette propriété est précieuse pour
 
 ```mermaid
 graph TD
-    A["LLM — texte libre"] -->|"'Il y a environ 320 personnes,\nle bruit semble élevé.'"| B["Application"]
-    B -->|"❌ Impossible de parser\nsans traitement complexe"| C["Erreur ou données incorrectes"]
+    A["LLM — texte libre"] -->|"'Il y a environ 320 personnes,<br/>le bruit semble élevé.'"| B["Application"]
+    B -->|"❌ Impossible de parser<br/>sans traitement complexe"| C["Erreur ou données incorrectes"]
 ```
 
 Problèmes du texte libre :
@@ -6876,10 +6876,10 @@ Un **contrat de données** est la spécification formelle de ce que le LLM doit 
 
 ```mermaid
 graph TD
-    LLM["LLM"] -->|"Structured Output\n(validé Pydantic)"| Contract["Contrat de données"]
-    Contract -->|"Données fiables\net typées"| App["Application"]
-    App -->|"Règles métier\net schéma"| Contract
-    Contract -->|"Prompt + exemples\n+ format attendu"| LLM
+    LLM["LLM"] -->|"Structured Output<br/>(validé Pydantic)"| Contract["Contrat de données"]
+    Contract -->|"Données fiables<br/>et typées"| App["Application"]
+    App -->|"Règles métier<br/>et schéma"| Contract
+    Contract -->|"Prompt + exemples<br/>+ format attendu"| LLM
 ```
 
 Principes pour concevoir un bon contrat :
