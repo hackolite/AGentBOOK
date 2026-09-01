@@ -12496,9 +12496,9 @@ Un retriever peut être transformé en tool, ce qui permet à un agent de décid
 #### B.6 Agents
 
 ```python
-from langchain.agents import create_agent
+from langgraph.prebuilt import create_react_agent
 
-agent = create_agent(
+agent = create_react_agent(
     model="openai:gpt-4o",
     tools=[get_zone_status, list_zones, notify_staff],
     prompt="Tu supervises le site. Vérifie toujours avant d'agir.",
@@ -12830,7 +12830,7 @@ Synthèse :
 
 - [ ] Journalisation structurée (JSON), jamais de texte libre concaténé.
 - [ ] `trace_id`, `thread_id`, `user_id` présents sur chaque entrée.
-- [ ] Prompts et sorties journalisés avec redaction des données personnelles.
+- [ ] Prompts et sorties journalisés avec masquage des données personnelles.
 - [ ] Niveaux cohérents : `INFO` pour le cycle nominal, `WARNING` pour le récupérable, `ERROR` pour le fatal.
 - [ ] Rétention et purge définies conformément à la politique de données.
 
@@ -12947,7 +12947,7 @@ Synthèse :
 
 **LLM** — *Large Language Model*. Modèle probabiliste qui prédit la suite d'une séquence de tokens. Dans une architecture agentique, il joue le rôle de moteur de raisonnement, pas de source de vérité.
 
-**Middleware** — Couche qui s'intercale autour des appels (modèle, tools) pour ajouter des comportements transverses : journalisation, garde-fous, limitation, cache, redaction.
+**Middleware** — Couche qui s'intercale autour des appels (modèle, tools) pour ajouter des comportements transverses : journalisation, garde-fous, limitation, cache, masquage des données sensibles.
 
 **Multi-agent** — Architecture où plusieurs agents spécialisés collaborent, généralement coordonnés par un superviseur ou par passage de main explicite.
 
