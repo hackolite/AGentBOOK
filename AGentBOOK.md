@@ -12023,71 +12023,950 @@ Ce projet condense tout le livre : pré-traitement déterministe (Partie XIII), 
 ## Annexes
 
 ### Annexe A — Référence Python
-- Typing
-- Pydantic
-- AsyncIO
-- FastAPI
-- Gestion des exceptions
+
+Cette annexe rassemble les éléments de Python indispensables pour écrire des applications LangChain / LangGraph de production. Elle ne remplace pas la documentation officielle : elle isole ce qui sert réellement dans le code du livre.
+
+#### A.1 Typing
+
+Le typage n'est pas décoratif dans un projet agentique : LangChain et LangGraph **dérivent des schémas** à partir des annotations (schéma d'un tool, schéma du state, schéma d'une sortie structurée). Une annotation manquante ou fausse se traduit par un tool mal décrit et donc mal appelé par le modèle.
+
+```python
+from typing import Annotated, Any, Literal, Optional, TypedDict
+
+
+def summarize(text: str, max_words: int = 100) -> str:
+    """Les annotations décrivent le contrat, pas seulement l'intention."""
+    return text[:max_words]
+
+
+# Types génériques natifs (Python 3.9+)
+zones: list[str] = ["hall", "quai_transport"]
+counts: dict[str, int] = {"hall": 128}
+
+# Union et optionnalité (Python 3.10+)
+score: float | None = None
+identifier: int | str = "zone-12"
+
+# Optional[X] est strictement équivalent à X | None
+label: Optional[str] = None
+
+# Literal : ensemble fermé de valeurs, très utile pour les sorties structurées
+Severity = Literal["info", "warning", "critical"]
+
+
+class ZoneSnapshot(TypedDict):
+    """Dictionnaire typé : structure connue, coût nul à l'exécution."""
+
+    zone_id: str
+    people_count: int
+    density: float
+```
+
+`Annotated` attache des métadonnées à un type. LangGraph s'en sert pour associer un **reducer** à un champ de state ; Pydantic s'en sert pour des contraintes de validation.
+
+```python
+from operator import add
+
+# À chaque écriture, les listes sont concaténées au lieu d'être remplacées
+Events = Annotated[list[dict], add]
+```
+
+Quelques règles pratiques :
+
+| Règle | Raison |
+|-------|--------|
+| Annoter toutes les fonctions exposées comme tools | Le schéma envoyé au modèle en dépend |
+| Préférer `Literal` à `str` pour les énumérations | Réduit les hallucinations de valeur |
+| Éviter `Any` sauf aux frontières du système | `Any` désactive toute vérification |
+| Activer `mypy` ou `pyright` en CI | Les erreurs de schéma apparaissent à la compilation, pas en production |
+
+#### A.2 Pydantic
+
+Pydantic est le **contrat de données** du livre : il valide les entrées des tools, les sorties structurées du modèle et la configuration de l'application.
+
+```python
+from pydantic import BaseModel, Field, field_validator
+
+
+class IncidentReport(BaseModel):
+    """Rapport d'incident produit par un agent."""
+
+    zone_id: str = Field(description="Identifiant de la zone concernée")
+    severity: Severity
+    people_count: int = Field(ge=0, description="Nombre de personnes détectées")
+    confidence: float = Field(ge=0.0, le=1.0)
+    evidence: list[str] = Field(default_factory=list)
+
+    @field_validator("zone_id")
+    @classmethod
+    def zone_must_be_known(cls, value: str) -> str:
+        if not value.startswith("zone-"):
+            raise ValueError("zone_id doit être préfixé par 'zone-'")
+        return value
+```
+
+Points à retenir :
+
+- `Field(description=...)` n'est pas un commentaire : la description **est envoyée au modèle** dans le schéma JSON. Elle guide la génération.
+- Les validateurs (`field_validator`, `model_validator`) portent les règles métier que le typage seul ne peut pas exprimer.
+- `model_validate()` valide depuis un dictionnaire, `model_dump()` sérialise, `model_json_schema()` produit le schéma envoyé au LLM.
+- Une `ValidationError` sur une sortie de modèle n'est pas un bug : c'est le signal qu'il faut **retenter** avec le message d'erreur en contexte.
+
+```python
+from pydantic import ValidationError
+
+try:
+    report = IncidentReport.model_validate(raw_output)
+except ValidationError as exc:
+    # Le message d'erreur est réinjecté dans le prompt de la tentative suivante
+    retry_context = exc.errors()
+```
+
+La configuration applicative se déclare de la même manière, avec `pydantic-settings`, ce qui évite les `os.environ[...]` dispersés dans le code.
+
+```python
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Configuration chargée depuis l'environnement, validée au démarrage."""
+
+    model_config = SettingsConfigDict(env_file=".env")
+
+    openai_api_key: str
+    model_name: str = "gpt-4o"
+    max_iterations: int = 8
+    request_timeout_s: float = 30.0
+```
+
+#### A.3 AsyncIO
+
+Un agent passe l'essentiel de son temps à **attendre** : appels au modèle, appels HTTP des tools, requêtes au vector store. L'asynchrone permet de paralléliser ces attentes sans multiplier les threads.
+
+```python
+import asyncio
+
+
+async def fetch_zone(zone_id: str) -> dict:
+    """Une coroutine ne s'exécute que lorsqu'elle est attendue."""
+    await asyncio.sleep(0.1)  # simule un appel réseau
+    return {"zone_id": zone_id, "people_count": 42}
+
+
+async def fetch_all(zone_ids: list[str]) -> list[dict]:
+    """gather lance les appels en parallèle et attend l'ensemble."""
+    return await asyncio.gather(*(fetch_zone(zone_id) for zone_id in zone_ids))
+
+
+results = asyncio.run(fetch_all(["zone-1", "zone-2", "zone-3"]))
+```
+
+Dans LangChain et LangGraph, chaque primitive a sa variante asynchrone : `ainvoke`, `astream`, `abatch`. La règle est de ne pas mélanger : une chaîne appelée en `ainvoke` doit contenir des tools asynchrones, sinon un tool bloquant gèle la boucle d'événements.
+
+```python
+result = await graph.ainvoke({"messages": [("user", question)]})
+
+async for chunk in graph.astream({"messages": [("user", question)]}):
+    print(chunk)
+```
+
+Deux garde-fous indispensables en production :
+
+```python
+# Timeout : un tool lent ne doit jamais bloquer une requête utilisateur
+try:
+    data = await asyncio.wait_for(fetch_zone("zone-1"), timeout=5.0)
+except asyncio.TimeoutError:
+    data = {"error": "timeout"}
+
+# Sémaphore : limiter la concurrence pour respecter les quotas du fournisseur
+semaphore = asyncio.Semaphore(10)
+
+
+async def limited_call(zone_id: str) -> dict:
+    async with semaphore:
+        return await fetch_zone(zone_id)
+```
+
+Pour du code bloquant impossible à convertir (client SDK synchrone, traitement d'image CPU), il faut le déporter :
+
+```python
+data = await asyncio.to_thread(blocking_inference, image_bytes)
+```
+
+#### A.4 FastAPI
+
+FastAPI est la couche d'exposition retenue dans le livre : elle réutilise directement les modèles Pydantic et supporte nativement l'asynchrone et le streaming.
+
+```python
+from contextlib import asynccontextmanager
+
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+
+
+class AskRequest(BaseModel):
+    question: str
+    thread_id: str
+
+
+class AskResponse(BaseModel):
+    answer: str
+    trace_id: str
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Ressources coûteuses créées une fois au démarrage, libérées à l'arrêt."""
+    app.state.graph = build_graph()
+    yield
+    await app.state.checkpointer.aclose()
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+def get_graph():
+    return app.state.graph
+
+
+@app.post("/ask", response_model=AskResponse)
+async def ask(request: AskRequest, graph=Depends(get_graph)) -> AskResponse:
+    config = {"configurable": {"thread_id": request.thread_id}}
+    try:
+        result = await graph.ainvoke(
+            {"messages": [("user", request.question)]},
+            config=config,
+        )
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="agent timeout") from exc
+
+    return AskResponse(
+        answer=result["messages"][-1].content,
+        trace_id=result.get("trace_id", ""),
+    )
+
+
+@app.get("/health")
+async def health() -> dict:
+    return {"status": "ok"}
+```
+
+Le streaming des tokens vers le client se fait avec une réponse en flux :
+
+```python
+@app.post("/ask/stream")
+async def ask_stream(request: AskRequest, graph=Depends(get_graph)):
+    async def generate():
+        config = {"configurable": {"thread_id": request.thread_id}}
+        async for chunk in graph.astream(
+            {"messages": [("user", request.question)]},
+            config=config,
+            stream_mode="messages",
+        ):
+            yield f"data: {chunk}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+```
+
+Bonnes pratiques : un `thread_id` explicite par conversation (il pilote la persistance), un endpoint `/health` distinct du endpoint métier, et la validation d'entrée déléguée entièrement à Pydantic.
+
+#### A.5 Gestion des exceptions
+
+Dans un système agentique, une exception a deux destinataires possibles : le **modèle** (qui peut corriger son appel) ou l'**opérateur** (qui doit intervenir). Les confondre produit soit des boucles infinies, soit des pannes silencieuses.
+
+```python
+class AgentError(Exception):
+    """Racine de la hiérarchie d'erreurs de l'application."""
+
+
+class ToolExecutionError(AgentError):
+    """Erreur récupérable : renvoyée au modèle pour qu'il ajuste son appel."""
+
+
+class FatalConfigurationError(AgentError):
+    """Erreur non récupérable : l'appel doit échouer immédiatement."""
+```
+
+Un tool ne doit jamais laisser fuiter une stack trace ni un détail d'infrastructure vers le modèle : il renvoie un message court, actionnable et sans donnée sensible.
+
+```python
+import logging
+
+from langchain_core.tools import tool
+
+logger = logging.getLogger(__name__)
+
+
+@tool
+def get_zone_status(zone_id: str) -> str:
+    """Retourne l'état courant d'une zone."""
+    try:
+        return zone_client.status(zone_id)
+    except KeyError:
+        return (
+            f"Zone inconnue : {zone_id}. "
+            "Utilise list_zones() pour les valeurs valides."
+        )
+    except TimeoutError:
+        logger.warning("timeout zone_client", extra={"zone_id": zone_id})
+        return (
+            "Service temporairement indisponible. "
+            "Réessaie ou signale l'indisponibilité."
+        )
+```
+
+Trois principes :
+
+1. **Ne jamais utiliser `except Exception: pass`** — une erreur avalée devient une hallucination plus loin dans la chaîne.
+2. **Distinguer récupérable et fatal** — le récupérable retourne un message au modèle, le fatal remonte à l'appelant.
+3. **Journaliser en structuré** (`extra={...}`), pas en texte libre, pour pouvoir corréler avec les traces.
+
+La logique de reprise, elle, s'implémente autour de l'appel et non dedans, avec un backoff exponentiel borné :
+
+```python
+import random
+
+
+async def call_with_retry(fn, attempts: int = 3):
+    """Retente les erreurs transitoires, échoue vite sur les erreurs définitives."""
+    for attempt in range(attempts):
+        try:
+            return await fn()
+        except FatalConfigurationError:
+            raise
+        except (TimeoutError, ConnectionError):
+            if attempt == attempts - 1:
+                raise
+            await asyncio.sleep(2**attempt + random.random())
+```
+
 ### Annexe B — Référence LangChain
-- Models
-- Messages
-- Prompts
-- Tools
-- Retrievers
-- Agents
-- Structured output
+
+Aide-mémoire des primitives LangChain utilisées dans le livre. Toutes s'assemblent via la **Runnable interface** : `invoke`, `ainvoke`, `stream`, `astream`, `batch`.
+
+#### B.1 Models
+
+```python
+from langchain.chat_models import init_chat_model
+
+model = init_chat_model(
+    "openai:gpt-4o",
+    temperature=0,
+    timeout=30,
+    max_retries=2,
+)
+
+response = model.invoke("Résume la situation de la zone hall.")
+```
+
+| Paramètre | Effet | Valeur conseillée |
+|-----------|-------|-------------------|
+| `temperature` | Variabilité de la génération | `0` pour l'extraction et le routing |
+| `timeout` | Coupe un appel trop long | 20–60 s selon la tâche |
+| `max_retries` | Reprise sur erreur transitoire | 2–3 |
+| `max_tokens` | Borne le coût d'une réponse | selon le cas d'usage |
+
+`init_chat_model` abstrait le fournisseur : changer `openai:gpt-4o` en `anthropic:claude-...` ne change pas le reste du code. C'est ce qui rend le **fallback** trivial :
+
+```python
+robust_model = model.with_fallbacks(
+    [init_chat_model("anthropic:claude-3-5-sonnet-latest")]
+)
+```
+
+#### B.2 Messages
+
+```python
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
+
+messages = [
+    SystemMessage(content="Tu es un agent de supervision de site."),
+    HumanMessage(content="Que se passe-t-il en zone hall ?"),
+    AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "get_zone_status",
+                "args": {"zone_id": "zone-hall"},
+                "id": "call_1",
+            }
+        ],
+    ),
+    ToolMessage(content="128 personnes, densité 0.62", tool_call_id="call_1"),
+]
+```
+
+| Type | Émetteur | Rôle |
+|------|----------|------|
+| `SystemMessage` | développeur | définit le rôle, les règles, les interdits |
+| `HumanMessage` | utilisateur | la demande |
+| `AIMessage` | modèle | réponse texte **ou** demande d'appel de tool |
+| `ToolMessage` | runtime | résultat d'exécution, lié par `tool_call_id` |
+
+Règle invariante : à tout `tool_call` d'un `AIMessage` doit correspondre un `ToolMessage` avec le même `tool_call_id`, sinon l'appel suivant au modèle échoue.
+
+#### B.3 Prompts
+
+```python
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+
+prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", "Tu supervises le site {site_name}. Réponds en français."),
+        MessagesPlaceholder("history"),
+        ("human", "{question}"),
+    ]
+)
+
+chain = prompt | model
+result = chain.invoke(
+    {"site_name": "Gare Nord", "history": [], "question": "État du hall ?"}
+)
+```
+
+`MessagesPlaceholder` est le point d'injection de l'historique ; le reste du template reste stable et versionnable. `partial()` permet de figer une variable connue au démarrage (nom du site, date, politique de sécurité).
+
+#### B.4 Tools
+
+```python
+from langchain_core.tools import tool
+from pydantic import BaseModel, Field
+
+
+class ZoneQuery(BaseModel):
+    zone_id: str = Field(description="Identifiant de zone, ex. 'zone-hall'")
+    window_minutes: int = Field(default=5, ge=1, le=60)
+
+
+@tool(args_schema=ZoneQuery)
+def get_zone_status(zone_id: str, window_minutes: int = 5) -> str:
+    """Retourne l'occupation d'une zone sur une fenêtre glissante.
+
+    À utiliser pour connaître l'état courant d'une zone du site.
+    """
+    return zone_client.status(zone_id, window_minutes)
+```
+
+La **docstring est le prompt du tool** : elle dit au modèle quand l'utiliser, pas comment il est implémenté. Un tool bien nommé, avec un schéma strict et une description orientée usage, supprime la majorité des erreurs de sélection.
+
+Liaison au modèle :
+
+```python
+model_with_tools = model.bind_tools([get_zone_status, list_zones])
+response = model_with_tools.invoke(messages)
+
+for call in response.tool_calls:
+    print(call["name"], call["args"], call["id"])
+```
+
+#### B.5 Retrievers
+
+```python
+from langchain_community.vectorstores import FAISS
+from langchain_openai import OpenAIEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+chunks = splitter.split_documents(documents)
+
+store = FAISS.from_documents(chunks, OpenAIEmbeddings())
+retriever = store.as_retriever(
+    search_type="mmr",
+    search_kwargs={"k": 5, "fetch_k": 20},
+)
+
+docs = retriever.invoke("procédure d'évacuation du quai transport")
+```
+
+| Stratégie | Usage |
+|-----------|-------|
+| `similarity` | recherche standard par proximité vectorielle |
+| `mmr` | diversifie les résultats, réduit la redondance |
+| `similarity_score_threshold` | ne renvoie rien si aucun document n'est pertinent |
+
+Un retriever peut être transformé en tool, ce qui permet à un agent de décider **s'il doit chercher** au lieu de chercher systématiquement.
+
+#### B.6 Agents
+
+```python
+from langchain.agents import create_agent
+
+agent = create_agent(
+    model="openai:gpt-4o",
+    tools=[get_zone_status, list_zones, notify_staff],
+    prompt="Tu supervises le site. Vérifie toujours avant d'agir.",
+)
+
+result = agent.invoke({"messages": [("user", "Le hall est-il saturé ?")]})
+print(result["messages"][-1].content)
+```
+
+L'agent encapsule la boucle *modèle → tool calls → résultats → modèle*. Les leviers de contrôle sont le prompt, la liste des tools et les bornes d'exécution (nombre d'itérations, timeout global, budget).
+
+#### B.7 Structured output
+
+```python
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+
+class ZoneAssessment(BaseModel):
+    """Évaluation d'une zone."""
+
+    severity: Literal["info", "warning", "critical"]
+    summary: str = Field(description="Une phrase, factuelle")
+    evidence: list[str]
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
+structured_model = model.with_structured_output(ZoneAssessment)
+assessment: ZoneAssessment = structured_model.invoke(prompt_text)
+```
+
+La sortie structurée garantit la **forme**, jamais la **véracité** : `confidence` peut être élevée sur un contenu faux. La validation métier (la zone existe-t-elle ? le comptage est-il plausible ?) reste à la charge du code appelant.
+
 ### Annexe C — Référence LangGraph
-- State
-- Nodes
-- Edges
-- Conditional edges
-- Checkpoints
-- Interruptions
-- Persistence
-- Subgraphs
+
+LangGraph modélise une application agentique comme un **graphe d'états** : des nodes qui transforment un state partagé, des edges qui décident de la suite.
+
+#### C.1 State
+
+```python
+from operator import add
+from typing import Annotated, Optional, TypedDict
+
+from langgraph.graph.message import add_messages
+
+
+class AppState(TypedDict):
+    """State applicatif : ce qui doit survivre d'un node à l'autre."""
+
+    messages: Annotated[list, add_messages]
+    zone_id: str
+    snapshots: Annotated[list[dict], add]
+    assessment: Optional[dict]
+    requires_human: bool
+```
+
+Chaque champ a une **politique d'écriture** :
+
+| Déclaration | Comportement |
+|-------------|--------------|
+| `field: T` | remplacement (dernière écriture gagne) |
+| `Annotated[list[T], add]` | concaténation |
+| `Annotated[list, add_messages]` | ajout de messages avec déduplication par `id` |
+
+Un node retourne un dictionnaire **partiel** : seules les clés présentes sont mises à jour.
+
+#### C.2 Nodes
+
+```python
+def assess_node(state: AppState) -> dict:
+    """Un node est une fonction pure state -> mise à jour partielle."""
+    assessment = structured_model.invoke(build_prompt(state))
+    return {
+        "assessment": assessment.model_dump(),
+        "requires_human": assessment.severity == "critical",
+    }
+```
+
+Règles : un node fait **une** chose, ne mute pas le state reçu, et reste idempotent autant que possible (il peut être rejoué après une reprise sur checkpoint).
+
+#### C.3 Edges
+
+```python
+from langgraph.graph import END, START, StateGraph
+
+builder = StateGraph(AppState)
+builder.add_node("collect", collect_node)
+builder.add_node("assess", assess_node)
+builder.add_node("act", act_node)
+
+builder.add_edge(START, "collect")
+builder.add_edge("collect", "assess")
+builder.add_edge("act", END)
+```
+
+Une edge simple exprime une séquence imposée. Deux edges sortant d'un même node déclenchent une exécution **parallèle** des cibles, et le state doit alors utiliser des reducers compatibles avec l'écriture concurrente.
+
+#### C.4 Conditional edges
+
+```python
+from typing import Literal
+
+
+def route(state: AppState) -> Literal["human_review", "act"]:
+    """La décision de routage est du code, pas une génération du modèle."""
+    if state["requires_human"]:
+        return "human_review"
+    return "act"
+
+
+builder.add_conditional_edges("assess", route, ["human_review", "act"])
+```
+
+Le routing conditionnel est le point où l'on reprend le contrôle sur le modèle : les règles critiques (escalade, refus, arrêt) doivent vivre ici, pas dans le prompt.
+
+#### C.5 Checkpoints
+
+```python
+from langgraph.checkpoint.memory import InMemorySaver
+
+graph = builder.compile(checkpointer=InMemorySaver())
+
+config = {"configurable": {"thread_id": "incident-42"}}
+graph.invoke({"zone_id": "zone-hall"}, config=config)
+```
+
+Un checkpoint est une **photo du state après chaque super-step**. Il permet de reprendre une exécution interrompue, d'inspecter l'historique et de rejouer un scénario.
+
+```python
+snapshot = graph.get_state(config)
+history = list(graph.get_state_history(config))
+```
+
+En production, `InMemorySaver` est réservé aux tests ; on utilise un backend persistant (Postgres, SQLite) partagé entre les instances.
+
+#### C.6 Interruptions
+
+```python
+from langgraph.types import Command, interrupt
+
+
+def human_review_node(state: AppState) -> dict:
+    """Suspend l'exécution et rend la main à un opérateur."""
+    decision = interrupt(
+        {
+            "assessment": state["assessment"],
+            "proposed_action": state.get("proposed_action"),
+        }
+    )
+    return {"approved": decision["approved"]}
+
+
+# Reprise après décision humaine
+graph.invoke(Command(resume={"approved": True}), config=config)
+```
+
+`interrupt()` exige un checkpointer : l'exécution est gelée dans le store, puis reprise plus tard — éventuellement dans un autre processus. On peut aussi interrompre de façon statique avec `interrupt_before=["act"]` à la compilation.
+
+#### C.7 Persistence
+
+| Portée | Mécanisme | Usage |
+|--------|-----------|-------|
+| Un thread (conversation) | checkpointer | historique, reprise, human-in-the-loop |
+| Entre threads (utilisateur) | store long terme | préférences, faits durables |
+
+```python
+from langgraph.store.memory import InMemoryStore
+
+store = InMemoryStore()
+graph = builder.compile(checkpointer=checkpointer, store=store)
+
+
+def remember(state: AppState, *, store) -> dict:
+    store.put(("user", state["user_id"]), "preferences", {"lang": "fr"})
+    return {}
+```
+
+Le `thread_id` est la clé d'isolation : deux utilisateurs ne doivent jamais partager un thread, sous peine de fuite de contexte.
+
+#### C.8 Subgraphs
+
+```python
+investigation = investigation_builder.compile()
+
+parent = StateGraph(AppState)
+parent.add_node("investigate", investigation)  # un graphe est un node
+parent.add_edge(START, "investigate")
+```
+
+Un subgraph encapsule une compétence (investigation, rédaction, vérification) réutilisable et testable isolément. Si le state interne diffère du state parent, on l'appelle via une fonction d'adaptation qui traduit les clés dans les deux sens. C'est la base des architectures multi-agents de la Partie XII.
+
 ### Annexe D — Patterns agentiques
-- ReAct
-- Router
-- Supervisor
-- Reflection
-- Evaluator-optimizer
-- Human-in-the-loop
-- Planning
-- Tool use
+
+Un pattern décrit **qui décide quoi**. Le choix se fait toujours du plus contraint vers le plus autonome.
+
+#### D.1 ReAct
+
+Le modèle alterne raisonnement et action jusqu'à disposer d'assez d'informations pour répondre.
+
+```mermaid
+graph LR
+    A["Question"] --> B["LLM"]
+    B -->|"tool call"| C["Tools"]
+    C --> B
+    B -->|"réponse"| D["Sortie"]
+```
+
+- **Quand** : la séquence d'étapes n'est pas connue à l'avance.
+- **Risques** : boucles, coût variable, difficulté à auditer.
+- **Garde-fous** : nombre maximal d'itérations, timeout global, budget de tokens, tools read-only par défaut.
+
+#### D.2 Router
+
+Un classifieur oriente la requête vers une branche spécialisée, puis le traitement est déterministe.
+
+```python
+def route(state: AppState) -> Literal["rag", "sql", "smalltalk"]:
+    return classifier.invoke(state["messages"][-1].content).route
+```
+
+- **Quand** : plusieurs cas d'usage distincts derrière une même entrée.
+- **Avantage** : chaque branche a son prompt, ses tools et ses tests.
+- **Point de vigilance** : prévoir explicitement la branche « inconnu ».
+
+#### D.3 Supervisor
+
+Un agent superviseur délègue à des agents spécialisés et agrège leurs résultats.
+
+```mermaid
+graph TD
+    S["Superviseur"] --> A1["Agent recherche"]
+    S --> A2["Agent analyse"]
+    S --> A3["Agent rédaction"]
+    A1 --> S
+    A2 --> S
+    A3 --> S
+    S --> R["Résultat"]
+```
+
+- **Quand** : le domaine se découpe en compétences réellement disjointes.
+- **Coût** : chaque délégation est un appel LLM supplémentaire ; la latence s'additionne.
+- **Règle** : ne pas créer un agent là où une fonction suffit.
+
+#### D.4 Reflection
+
+Le système critique sa propre sortie et la révise.
+
+```python
+def reflect_node(state: AppState) -> dict:
+    critique = critic_model.invoke(state["draft"])
+    return {"critique": critique.content, "needs_revision": critique.score < 0.7}
+```
+
+- **Quand** : la qualité prime sur la latence (rédaction, code, synthèse).
+- **Limite** : un modèle qui se relit seul reste dans son propre biais ; borner le nombre de cycles (2 à 3) et préférer une critique appuyée sur des **preuves externes**.
+
+#### D.5 Evaluator-optimizer
+
+Variante de la réflexion où l'évaluateur est **séparé** du générateur, avec des critères explicites.
+
+```python
+class Evaluation(BaseModel):
+    passes: bool
+    failed_criteria: list[str]
+    suggestions: list[str]
+```
+
+La boucle s'arrête quand `passes` est vrai ou quand le budget d'itérations est épuisé. Les critères d'évaluation doivent être les mêmes que ceux du golden dataset (Partie XIV), sinon on optimise une métrique qui n'est pas mesurée.
+
+#### D.6 Human-in-the-loop
+
+L'humain valide, corrige ou complète avant une action irréversible.
+
+| Niveau | Mécanisme | Cas |
+|--------|-----------|-----|
+| Approbation | `interrupt()` avant l'action | action irréversible ou coûteuse |
+| Édition | modification du state avant reprise | correction d'un paramètre |
+| Escalade | routage vers un opérateur | faible confiance, cas hors périmètre |
+
+L'humain doit recevoir **l'action proposée et ses preuves** : une demande d'approbation sans justification n'est qu'un clic de conformité.
+
+#### D.7 Planning
+
+Le système produit d'abord un plan explicite, puis l'exécute étape par étape.
+
+```python
+class Plan(BaseModel):
+    steps: list[str]
+    expected_tools: list[str]
+```
+
+- **Quand** : tâches longues, multi-étapes, où l'ordre compte.
+- **Avantage** : le plan est inspectable et validable avant toute exécution.
+- **Piège** : un plan figé vieillit mal ; prévoir une re-planification quand une étape échoue.
+
+#### D.8 Tool use
+
+Le pattern minimal : un appel de modèle, un ou plusieurs tools, pas de boucle.
+
+- **Quand** : la tâche est connue et bornée (extraire, convertir, chercher une valeur).
+- **Pourquoi le préférer** : coût prévisible, latence stable, test unitaire trivial.
+
+Synthèse :
+
+| Pattern | Autonomie | Prévisibilité | Coût |
+|---------|-----------|---------------|------|
+| Tool use | faible | très élevée | faible |
+| Router | faible | élevée | faible |
+| Planning | moyenne | moyenne | moyen |
+| Reflection / Evaluator | moyenne | moyenne | élevé |
+| ReAct | élevée | faible | variable |
+| Supervisor | élevée | faible | élevé |
+
 ### Annexe E — Checklist production
-- Tests
-- Logs
-- Tracing
-- Evaluation
-- Monitoring
-- Authentication
-- Authorization
-- Rate limiting
-- Gestion des secrets
-- Gestion des coûts
-- Gestion de la latence
-- Gestion des erreurs
-- Persistence
-- Recovery
-- Human-in-the-loop
+
+À dérouler avant la mise en service, puis à revoir à chaque évolution majeure de l'agent.
+
+#### E.1 Tests
+
+- [ ] Tests unitaires des tools avec dépendances externes simulées.
+- [ ] Tests des nodes LangGraph sur un state d'entrée figé.
+- [ ] Tests de routage : chaque branche conditionnelle est couverte, y compris le cas par défaut.
+- [ ] Tests de bout en bout avec un modèle simulé (réponses déterministes).
+- [ ] Tests de non-régression sur le golden dataset avant chaque déploiement.
+- [ ] Tests des cas d'échec : tool indisponible, sortie invalide, timeout, budget dépassé.
+
+#### E.2 Logs
+
+- [ ] Journalisation structurée (JSON), jamais de texte libre concaténé.
+- [ ] `trace_id`, `thread_id`, `user_id` présents sur chaque entrée.
+- [ ] Prompts et sorties journalisés avec redaction des données personnelles.
+- [ ] Niveaux cohérents : `INFO` pour le cycle nominal, `WARNING` pour le récupérable, `ERROR` pour le fatal.
+- [ ] Rétention et purge définies conformément à la politique de données.
+
+#### E.3 Tracing
+
+- [ ] Trace complète : appels modèle, tool calls, transitions de nodes.
+- [ ] Tokens d'entrée / sortie et latence par étape.
+- [ ] Corrélation trace ↔ logs ↔ enregistrement d'audit.
+- [ ] Échantillonnage configuré si le volume l'exige.
+- [ ] Traces consultables par les opérateurs, pas seulement par les développeurs.
+
+#### E.4 Evaluation
+
+- [ ] Golden dataset versionné et représentatif des cas réels.
+- [ ] Métriques définies : exactitude, pertinence de la sélection de tools, respect du format, taux d'escalade.
+- [ ] Évaluation automatique en CI sur chaque changement de prompt, de modèle ou de tools.
+- [ ] Revue humaine périodique d'un échantillon de productions.
+- [ ] Les incidents de production alimentent le dataset.
+
+#### E.5 Monitoring
+
+- [ ] Tableaux de bord : latence P50/P95/P99, taux d'erreur, coût par requête.
+- [ ] Alertes sur dérive : hausse du taux d'échec de validation, du nombre d'itérations moyen, du coût.
+- [ ] Endpoint de santé distinct du chemin métier.
+- [ ] Suivi de la disponibilité du fournisseur de modèle et des dépendances (vector store, base).
+
+#### E.6 Authentication
+
+- [ ] Chaque requête est authentifiée ; aucun endpoint agent en accès anonyme.
+- [ ] Identité propagée jusqu'aux tools, jamais reconstruite depuis le contenu du prompt.
+- [ ] Jetons à durée de vie courte, rotation automatisée.
+
+#### E.7 Authorization
+
+- [ ] Les tools vérifient les droits **côté serveur**, indépendamment de ce que le modèle demande.
+- [ ] Toolset restreint selon le rôle de l'appelant.
+- [ ] Filtrage des documents RAG par périmètre d'accès de l'utilisateur.
+- [ ] Séparation stricte entre tools en lecture et tools à effet de bord.
+
+#### E.8 Rate limiting
+
+- [ ] Limite par utilisateur et par organisation.
+- [ ] Limite globale sortante pour respecter les quotas du fournisseur.
+- [ ] Réponses `429` explicites avec `Retry-After`.
+- [ ] Protection contre les boucles agentiques coûteuses (plafond d'itérations par requête).
+
+#### E.9 Gestion des secrets
+
+- [ ] Aucune clé en dur ni dans le dépôt ; chargement par variables d'environnement ou coffre.
+- [ ] Rotation possible sans redéploiement de code.
+- [ ] Secrets exclus des logs, des traces et des messages d'erreur renvoyés au modèle.
+- [ ] Scan de secrets en CI.
+
+#### E.10 Gestion des coûts
+
+- [ ] Coût par requête et par utilisateur mesuré, pas estimé.
+- [ ] Budget maximal par requête, avec arrêt propre au dépassement.
+- [ ] Modèle plus petit pour les étapes simples (routing, classification, reformulation).
+- [ ] Cache activé sur les appels répétés et les embeddings.
+- [ ] Contexte élagué : résumés au lieu d'historiques complets.
+
+#### E.11 Gestion de la latence
+
+- [ ] Streaming activé sur les réponses utilisateur.
+- [ ] Appels de tools indépendants parallélisés.
+- [ ] Timeouts par tool et timeout global de la requête.
+- [ ] Étapes lourdes traitées en asynchrone hors du chemin critique.
+- [ ] Contexte minimal : moins de tokens en entrée, moins de latence.
+
+#### E.12 Gestion des erreurs
+
+- [ ] Distinction claire entre erreurs récupérables (retour au modèle) et fatales (retour à l'appelant).
+- [ ] Retry avec backoff exponentiel et jitter sur les erreurs transitoires uniquement.
+- [ ] Fallback de modèle configuré.
+- [ ] Dégradation gracieuse : une réponse partielle et honnête vaut mieux qu'une erreur brute.
+- [ ] Aucun détail d'infrastructure exposé à l'utilisateur ou au modèle.
+
+#### E.13 Persistence
+
+- [ ] Checkpointer persistant (pas en mémoire) et partagé entre instances.
+- [ ] `thread_id` stable, isolé par utilisateur.
+- [ ] Sauvegardes et restauration testées.
+- [ ] Politique de rétention et de purge des états.
+- [ ] Migration de schéma du state prévue et versionnée.
+
+#### E.14 Recovery
+
+- [ ] Reprise d'une exécution interrompue depuis le dernier checkpoint.
+- [ ] Nodes idempotents ou protégés par une clé d'idempotence pour les effets de bord.
+- [ ] Procédure de rollback de prompt, de modèle et de version d'agent.
+- [ ] Comportement défini en cas d'indisponibilité prolongée du fournisseur.
+
+#### E.15 Human-in-the-loop
+
+- [ ] Liste explicite des actions exigeant une approbation humaine.
+- [ ] Preuves fournies avec chaque demande d'approbation.
+- [ ] Délai d'expiration d'une demande en attente et comportement par défaut sûr.
+- [ ] Décisions humaines journalisées et auditables.
+- [ ] Impossibilité pour le modèle de contourner l'approbation (contrôle dans le graphe, pas dans le prompt).
+
 ### Annexe F — Glossaire
-- Agent
-- LLM
-- Tool
-- Tool calling
-- RAG
-- Retriever
-- Embedding
-- Vector store
-- State
-- Node
-- Edge
-- Checkpoint
-- Middleware
-- Human-in-the-loop
-- Multi-agent
-- Agentic workflow
-- Observability
+
+**Agent** — Système dans lequel un LLM décide lui-même des actions à effectuer et de leur enchaînement, en boucle, jusqu'à atteindre un objectif. S'oppose au workflow, où l'enchaînement est fixé par le développeur.
+
+**Agentic workflow** — Architecture hybride : le squelette de l'exécution est déterministe, mais certaines étapes délèguent une décision à un LLM. C'est le compromis recommandé par défaut dans ce livre.
+
+**Checkpoint** — Photographie du state d'un graphe après une étape d'exécution, persistée par un checkpointer. Rend possibles la reprise, l'inspection, le rejeu et les interruptions.
+
+**Edge** — Transition entre deux nodes d'un graphe. Une *conditional edge* choisit la cible à l'exécution en fonction du state.
+
+**Embedding** — Représentation vectorielle d'un texte, telle que la proximité géométrique approxime la proximité sémantique. Base de la recherche du RAG.
+
+**Human-in-the-loop** — Insertion d'une décision humaine dans le cycle d'exécution : approbation, correction ou escalade, typiquement avant une action irréversible.
+
+**LLM** — *Large Language Model*. Modèle probabiliste qui prédit la suite d'une séquence de tokens. Dans une architecture agentique, il joue le rôle de moteur de raisonnement, pas de source de vérité.
+
+**Middleware** — Couche qui s'intercale autour des appels (modèle, tools) pour ajouter des comportements transverses : journalisation, garde-fous, limitation, cache, redaction.
+
+**Multi-agent** — Architecture où plusieurs agents spécialisés collaborent, généralement coordonnés par un superviseur ou par passage de main explicite.
+
+**Node** — Unité de travail d'un graphe LangGraph : une fonction qui reçoit le state et retourne une mise à jour partielle.
+
+**Observability** — Capacité à comprendre le comportement du système depuis l'extérieur, par la combinaison des logs, des traces et des métriques. Sans elle, un agent n'est pas exploitable en production.
+
+**RAG** — *Retrieval-Augmented Generation*. On récupère des documents pertinents et on les fournit au modèle en contexte, afin d'ancrer la réponse sur des sources plutôt que sur la mémoire paramétrique du modèle.
+
+**Retriever** — Composant qui, à partir d'une requête, renvoie un ensemble de documents pertinents. Peut s'appuyer sur un vector store, une recherche lexicale ou une combinaison des deux.
+
+**State** — Structure de données partagée par tous les nodes d'un graphe, qui porte l'information utile à la décision et évolue à chaque étape. Le state est la mémoire de travail explicite du système.
+
+**Tool** — Fonction exposée au modèle, décrite par un nom, une description et un schéma d'arguments. C'est l'unique interface entre le raisonnement du modèle et le monde extérieur.
+
+**Tool calling** — Mécanisme par lequel le modèle produit une demande d'appel structurée (nom du tool + arguments) que l'application exécute, avant de lui renvoyer le résultat. Le modèle n'exécute jamais rien lui-même.
+
+**Vector store** — Base de données spécialisée dans le stockage et la recherche de vecteurs par similarité, éventuellement filtrée par métadonnées.
+
 ### Annexe G — Références
 - documentation officielle LangChain ;
 - documentation officielle LangGraph ;
