@@ -12968,8 +12968,94 @@ Synthèse :
 **Vector store** — Base de données spécialisée dans le stockage et la recherche de vecteurs par similarité, éventuellement filtrée par métadonnées.
 
 ### Annexe G — Références
-- documentation officielle LangChain ;
-- documentation officielle LangGraph ;
-- documentation des fournisseurs de LLM ;
-- articles de recherche sur les agents et le RAG ;
-- publications sur l'évaluation des systèmes agentiques ;
+
+Les références ci-dessous sont celles sur lesquelles ce livre s'appuie. La documentation officielle fait autorité sur les API : lorsqu'un extrait de code de ce livre diverge de la documentation, c'est la documentation qui a raison. Les articles de recherche sont cités pour l'idée qu'ils introduisent, pas comme une recette d'implémentation. Les articles listés sont disponibles en accès libre sur arXiv ou dans les actes de la conférence indiquée ; ils se retrouvent par recherche sur le titre et les auteurs.
+
+#### G.1 Documentation officielle LangChain
+
+- **Documentation LangChain (Python)** — <https://python.langchain.com/docs/> — guides de démarrage, concepts, how-to. Point d'entrée principal.
+- **Référence d'API LangChain (Python)** — <https://python.langchain.com/api_reference/> — signatures exactes des classes et fonctions, par package (`langchain-core`, `langchain`, intégrations).
+- **Documentation LangChain (JavaScript / TypeScript)** — <https://js.langchain.com/docs/> — pour les portages de ce livre vers Node.
+- **Intégrations de modèles et de vector stores** — <https://python.langchain.com/docs/integrations/providers/> — tableau des fonctionnalités réellement supportées par chaque intégration (tool calling, sortie structurée, streaming, multimodalité).
+- **Code source et notes de version** — <https://github.com/langchain-ai/langchain> — la lecture du code d'un `Runnable` ou d'un retriever lève la plupart des ambiguïtés ; les *release notes* signalent les ruptures d'API.
+
+#### G.2 Documentation officielle LangGraph
+
+- **Documentation LangGraph (Python)** — <https://langchain-ai.github.io/langgraph/> — tutoriels, concepts, référence d'API.
+- **Concepts : state, nodes, edges, checkpointers, interruptions** — <https://langchain-ai.github.io/langgraph/concepts/> — à lire avant toute conception de graphe non triviale.
+- **Persistence et human-in-the-loop** — <https://langchain-ai.github.io/langgraph/concepts/persistence/> et <https://langchain-ai.github.io/langgraph/concepts/human_in_the_loop/> — sémantique exacte des `thread_id`, des checkpoints, de `interrupt` et de la reprise.
+- **LangGraph (JavaScript / TypeScript)** — <https://langchain-ai.github.io/langgraphjs/>.
+- **Code source** — <https://github.com/langchain-ai/langgraph> — y compris les implémentations de checkpointers (mémoire, SQLite, Postgres) citées au chapitre sur la persistence.
+- **LangSmith** — <https://docs.smith.langchain.com/> — traçage, jeux de données, évaluations et annotation humaine ; support de l'annexe sur l'observabilité et l'évaluation.
+
+#### G.3 Documentation des fournisseurs de LLM
+
+À consulter pour le format exact du tool calling, les limites de contexte, les quotas, les politiques de rétention des données et la tarification, qui évoluent plus vite que ce livre.
+
+- **OpenAI** — <https://platform.openai.com/docs>
+- **Anthropic** — <https://docs.anthropic.com/>
+- **Google (Gemini API)** — <https://ai.google.dev/gemini-api/docs>
+- **Mistral AI** — <https://docs.mistral.ai/>
+- **Cohere** — <https://docs.cohere.com/>
+- **Microsoft Azure OpenAI** — <https://learn.microsoft.com/azure/ai-services/openai/>
+- **AWS Bedrock** — <https://docs.aws.amazon.com/bedrock/>
+- **Google Cloud Vertex AI** — <https://cloud.google.com/vertex-ai/docs>
+- **Modèles auto-hébergés** — Ollama (<https://github.com/ollama/ollama>) et vLLM (<https://docs.vllm.ai/>) pour l'exécution locale ou sur GPU dédié, avec une API compatible OpenAI.
+- **Model Context Protocol (MCP)** — <https://modelcontextprotocol.io/> — protocole d'exposition de tools et de ressources indépendant du fournisseur.
+
+#### G.4 Articles de recherche sur les agents
+
+- Yao et al., *ReAct: Synergizing Reasoning and Acting in Language Models*, ICLR 2023 — origine de la boucle raisonnement / action reprise en D.1.
+- Wei et al., *Chain-of-Thought Prompting Elicits Reasoning in Large Language Models*, NeurIPS 2022.
+- Wang et al., *Self-Consistency Improves Chain of Thought Reasoning in Language Models*, ICLR 2023.
+- Zhou et al., *Least-to-Most Prompting Enables Complex Reasoning in Large Language Models*, ICLR 2023 — décomposition explicite, fondement du pattern planner.
+- Yao et al., *Tree of Thoughts: Deliberate Problem Solving with Large Language Models*, NeurIPS 2023 — exploration d'alternatives plutôt que d'une seule trajectoire.
+- Schick et al., *Toolformer: Language Models Can Teach Themselves to Use Tools*, NeurIPS 2023.
+- Qin et al., *ToolLLM: Facilitating Large Language Models to Master 16000+ Real-world APIs*, 2023 — passage à l'échelle du catalogue de tools.
+- Shinn et al., *Reflexion: Language Agents with Verbal Reinforcement Learning*, NeurIPS 2023 — boucle de critique et de correction.
+- Madaan et al., *Self-Refine: Iterative Refinement with Self-Feedback*, NeurIPS 2023.
+- Wu et al., *AutoGen: Enabling Next-Gen LLM Applications via Multi-Agent Conversation*, 2023 — coordination multi-agents.
+- Park et al., *Generative Agents: Interactive Simulacra of Human Behavior*, UIST 2023 — mémoire, réflexion et planification à long terme.
+- Packer et al., *MemGPT: Towards LLMs as Operating Systems*, 2023 — gestion hiérarchique du contexte, utile quand le state dépasse la fenêtre.
+- Wang et al., *Voyager: An Open-Ended Embodied Agent with Large Language Models*, 2023 — acquisition incrémentale de compétences réutilisables.
+- Sumers et al., *Cognitive Architectures for Language Agents*, TMLR 2024 — cadre d'analyse des architectures d'agents.
+- Anthropic, *Building Effective Agents*, 2024 — <https://www.anthropic.com/engineering/building-effective-agents> — la distinction workflow / agent utilisée tout au long de ce livre.
+
+#### G.5 Articles de recherche sur le RAG
+
+- Lewis et al., *Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks*, NeurIPS 2020 — article fondateur.
+- Guu et al., *REALM: Retrieval-Augmented Language Model Pre-Training*, ICML 2020.
+- Karpukhin et al., *Dense Passage Retrieval for Open-Domain Question Answering*, EMNLP 2020 — bi-encodeurs et embeddings de passages.
+- Khattab et Zaharia, *ColBERT: Efficient and Effective Passage Search via Contextualized Late Interaction over BERT*, SIGIR 2020.
+- Robertson et Zaragoza, *The Probabilistic Relevance Framework: BM25 and Beyond*, 2009 — la baseline lexicale que toute recherche hybride doit encore battre.
+- Izacard et Grave, *Leveraging Passage Retrieval with Generative Models for Open Domain Question Answering*, EACL 2021 — *fusion-in-decoder*.
+- Gao et al., *Precise Zero-Shot Dense Retrieval without Relevance Labels*, ACL 2023 — HyDE, réécriture de requête par document hypothétique.
+- Asai et al., *Self-RAG: Learning to Retrieve, Generate, and Critique through Self-Reflection*, ICLR 2024 — récupération conditionnelle et auto-critique.
+- Yan et al., *Corrective Retrieval Augmented Generation*, 2024 — repli lorsque les documents récupérés sont jugés insuffisants.
+- Sarthi et al., *RAPTOR: Recursive Abstractive Processing for Tree-Organized Retrieval*, ICLR 2024 — indexation hiérarchique pour les questions globales.
+- Edge et al., *From Local to Global: A Graph RAG Approach to Query-Focused Summarization*, 2024.
+- Liu et al., *Lost in the Middle: How Language Models Use Long Contexts*, TACL 2024 — justifie le reranking et la limitation du nombre de documents injectés.
+- Gao et al., *Retrieval-Augmented Generation for Large Language Models: A Survey*, 2023 — panorama d'ensemble et vocabulaire commun.
+
+#### G.6 Publications sur l'évaluation des systèmes agentiques
+
+- Zheng et al., *Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena*, NeurIPS 2023 — portée et biais connus du juge-LLM (position, verbosité, auto-préférence).
+- Liang et al., *Holistic Evaluation of Language Models (HELM)*, TMLR 2023 — évaluation multi-critères plutôt qu'un score unique.
+- Es et al., *RAGAS: Automated Evaluation of Retrieval Augmented Generation*, EACL 2024 — métriques de fidélité et de pertinence utilisées au chapitre évaluation.
+- Saad-Falcon et al., *ARES: An Automated Evaluation Framework for Retrieval-Augmented Generation Systems*, NAACL 2024.
+- Liu et al., *AgentBench: Evaluating LLMs as Agents*, ICLR 2024.
+- Mialon et al., *GAIA: A Benchmark for General AI Assistants*, ICLR 2024 — tâches nécessitant outils et navigation.
+- Zhou et al., *WebArena: A Realistic Web Environment for Building Autonomous Agents*, ICLR 2024.
+- Jimenez et al., *SWE-bench: Can Language Models Resolve Real-World GitHub Issues?*, ICLR 2024 — évaluation par vérification exécutable plutôt que par jugement.
+- Yao et al., *τ-bench: A Benchmark for Tool-Agent-User Interaction in Real-World Domains*, 2024 — respect des règles métier et fiabilité sur plusieurs essais.
+- Patil et al., *Gorilla: Large Language Model Connected with Massive APIs*, NeurIPS 2024, et le *Berkeley Function Calling Leaderboard* (<https://gorilla.cs.berkeley.edu/leaderboard.html>) — qualité du tool calling.
+- Outillage d'évaluation : LangSmith Evaluation (<https://docs.smith.langchain.com/evaluation>), promptfoo (<https://www.promptfoo.dev/>), DeepEval (<https://github.com/confident-ai/deepeval>).
+
+#### G.7 Sécurité, risques et conformité
+
+- OWASP, *Top 10 for Large Language Model Applications* — <https://owasp.org/www-project-top-10-for-large-language-model-applications/> — référence utilisée pour la section sur l'injection de prompt et l'exfiltration.
+- Greshake et al., *Not What You've Signed Up For: Compromising Real-World LLM-Integrated Applications with Indirect Prompt Injection*, AISec 2023.
+- Perez et Ribeiro, *Ignore Previous Prompt: Attack Techniques for Language Models*, 2022.
+- NIST, *AI Risk Management Framework (AI RMF 1.0)*, 2023 — <https://www.nist.gov/itl/ai-risk-management-framework>.
+- MITRE ATLAS — <https://atlas.mitre.org/> — taxonomie des techniques d'attaque contre les systèmes d'IA.
+- Union européenne, *Règlement (UE) 2024/1689 sur l'intelligence artificielle* — <https://eur-lex.europa.eu/eli/reg/2024/1689/oj> — obligations de transparence et de journalisation applicables selon le niveau de risque.
