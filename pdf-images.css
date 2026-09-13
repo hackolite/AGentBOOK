@@ -1,0 +1,10 @@
+/* Empêche le rognage (crop) des schémas/diagrammes trop grands lors de
+ * l'export PDF avec md-to-pdf (ou l'extension VS Code "Markdown PDF").
+ * Les images sont mises à l'échelle pour tenir dans la largeur de la page
+ * et prennent la hauteur nécessaire au lieu d'être coupées.
+ */
+img {
+  max-width: 100% !important;
+  height: auto !important;
+  page-break-inside: avoid;
+}

@@ -1,0 +1,14 @@
+% Empêche le rognage (crop) des schémas/diagrammes trop grands dans le PDF.
+% Les images (notamment les diagrammes Mermaid convertis par mermaid-filter)
+% sont automatiquement réduites pour tenir dans la largeur et la hauteur de
+% la page tout en conservant leurs proportions, au lieu d'être coupées.
+\usepackage{graphicx}
+\usepackage{grffile}
+\makeatletter
+\def\maxwidth{\ifdim\Gin@nat@width>\linewidth\linewidth\else\Gin@nat@width\fi}
+\def\maxheight{0.85\textheight}
+\makeatother
+\let\Oldincludegraphics\includegraphics
+\renewcommand{\includegraphics}[2][]{%
+  \Oldincludegraphics[width=\maxwidth,height=\maxheight,keepaspectratio,#1]{#2}%
+}
